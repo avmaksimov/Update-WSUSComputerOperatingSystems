@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 $MainScriptName = 'Update-WSUSComputerOperatingSystems.ps1'
 $TaskName = 'Update-WSUSComputerOperatingSystems'
 # Source repository (default branch: main).
-$DefaultMainScriptUrl = 'https://raw.githubusercontent.com/avmaksimov/Update-WSUSComputerOperatingSystems/main/Update-WSUSComputerOperatingSystems.ps1'
+$DefaultMainScriptUrl = 'https://raw.githubusercontent.com/Borgquite/Update-WSUSComputerOperatingSystems/main/Update-WSUSComputerOperatingSystems.ps1'
 if ([string]::IsNullOrWhiteSpace($MainScriptUrl)) { $MainScriptUrl = $DefaultMainScriptUrl }
 
 function Read-YesNo {

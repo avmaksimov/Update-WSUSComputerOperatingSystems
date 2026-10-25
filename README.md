@@ -1,183 +1,193 @@
-# Update-WSUSComputerOperatingSystems — event-driven fork
+# Update-WSUSComputerOperatingSystems
 
-This project is based on [Borgquite/Update-WSUSComputerOperatingSystems](https://github.com/Borgquite/Update-WSUSComputerOperatingSystems) and preserves its operating-system/build/edition mappings. It adds an optional event-driven mode that repairs Windows Server Update Services (WSUS) `OSDescription` values after clients overwrite them.
+Update the **OS Description** field in Windows Server Update Services (WSUS) with additional Windows edition and release information, such as `Windows 11 Enterprise 23H2` or `Windows Server 2022 Datacenter`.
 
-The event listener is based on a tested `Watch-WSUSOS-AutoFix-v1.1.ps1` prototype. **No `SqlServer` PowerShell module, NuGet provider, or other third-party runtime dependency is required.** The code uses `System.Data.SqlClient` from the .NET Framework available to Windows PowerShell 5.1.
+Do you still need to use WSUS in a location with low bandwidth / unreliable Internet connections, or in an airgapped environment, even once it is [deprecated](https://techcommunity.microsoft.com/t5/windows-it-pro-blog/windows-server-update-services-wsus-deprecation/ba-p/4250436)?
 
-> **Warning:** This utility directly updates the WSUS `SUSDB` database, which is not an officially supported Microsoft WSUS management API. Make a verified backup before deployment. Run and validate on a noncritical environment first. Provided without warranty under GPL-3.0.
+Do you think that preventing someone from [exercising rights you previously granted them](https://community.spiceworks.com/t/maybe-wam-wsus-is-not-longer-free/655421/37) is not behaviour that should be financially rewarded?
+
+The original script was designed from scratch using publicly available documentation and released to the community under the GNU General Public License version 3. The existing OS/build/edition catalog is retained and used by the additional modes described below.
+
+**Important:** This tool updates `OSDescription` directly in the WSUS `SUSDB` database. Direct changes to SUSDB are not an officially supported WSUS management API. **Back up SUSDB and verify the backup before use**, preferably test on a noncritical server first.
+
+## Features
+
+- **One-time correction:** scan WSUS computer records, identify known OS editions/builds and update incorrect `OSDescription` values, then exit.
+- **Event-driven correction:** `-AsService` performs an initial reconciliation and then uses SQL Query Notifications (`SqlDependency`) to detect new or changed WSUS computer records. This avoids repeated full scans on a fixed schedule.
+- **Safe update conditions:** check the computer's OS version, build, edition and current description before updating; avoid redundant writes and skip records changed concurrently.
+- **Automatic reconnection:** retry SQL listener failures and reconcile records after reconnecting.
+- **Scheduled-task installer:** optionally register a startup task running as `SYSTEM`, without copying scripts into a fixed system directory.
+- **Local log:** append timestamped `INFO`, `WARNING` and `ERROR` messages to `Update-WSUSComputerOperatingSystems.log` alongside the main script.
+- **No external PowerShell modules:** uses `System.Data.SqlClient` included with .NET Framework; the `SqlServer` PowerShell module and PowerShell Gallery packages are not required.
 
 ## Requirements
 
-- Windows Server 2019 Core or newer; Windows PowerShell 5.1 (Desktop edition).
-- WSUS with Windows Internal Database (WID) or Microsoft SQL Server.
-- SQL login with read access to `dbo.tbComputerTarget` and `dbo.tbComputerTargetDetail` and update access to `OSDescription`.
-- For `-AsService`: a working Service Broker in `SUSDB` and permission for SQL Query Notifications / `SqlDependency`. Confirm that the task account (`SYSTEM` by default) can establish the required SQL subscriptions.
-- No additional PowerShell modules need to be downloaded.
+- Windows PowerShell **5.1 (Desktop edition)** on the WSUS server. Tested with Windows Server 2019 Core; other server versions should be validated in your environment.
+- WSUS using Windows Internal Database (WID) or an accessible Microsoft SQL Server instance.
+- An account allowed to read `dbo.tbComputerTarget` and `dbo.tbComputerTargetDetail` and update `OSDescription` in `SUSDB`.
+- For `-AsService`, **Service Broker enabled in `SUSDB`** and permissions sufficient to establish SQL Query Notifications. The installation process does not enable Service Broker automatically.
+- Administrator privileges for installing or changing a scheduled task running as `SYSTEM`.
 
-## Manual runs
+## Run manually
 
-Run from an elevated Windows PowerShell 5.1 session on the WSUS server:
+Open an elevated Windows PowerShell 5.1 session **on the WSUS server** and run the main script:
 
 ```powershell
-# Check all computer records once; fix incorrect descriptions; exit.
+# Correct existing descriptions once and exit.
 .\Update-WSUSComputerOperatingSystems.ps1
 
-# Check existing records and then watch for changes indefinitely.
+# Correct existing descriptions, then monitor subsequent changes indefinitely.
 .\Update-WSUSComputerOperatingSystems.ps1 -AsService
 
-# Watch for 60 minutes and then exit.
+# Test the event listener for 60 minutes, then exit.
 .\Update-WSUSComputerOperatingSystems.ps1 -AsService -DurationMinutes 60
 ```
 
-By default, `-SQLServerInstance` is the local WID named pipe `\\.\pipe\MICROSOFT##WID\tsql\query`. For an external SQL Server:
+The default database connection is local WID (`\\.\pipe\MICROSOFT##WID\tsql\query`). To use an external SQL Server instance:
 
 ```powershell
 .\Update-WSUSComputerOperatingSystems.ps1 -SQLServerInstance 'SQLSERVER\INSTANCE' -AsService
 ```
 
-`-Encrypt Optional` is the default (ADO.NET `Encrypt=False`); `-Encrypt Mandatory` enables ADO.NET `Encrypt=True` and requires a trusted server certificate. `True` and `False` are also accepted. `-DurationMinutes` is only valid with `-AsService`; zero means no time limit. All known client and server OS editions are processed. Unknown builds/SKUs are left untouched.
+`-Encrypt Optional` is the default (`Encrypt=False` in the .NET connection string). `-Encrypt Mandatory` uses `Encrypt=True` and requires a trusted SQL Server certificate; `True` and `False` are also accepted. `-DurationMinutes` requires `-AsService`; zero means unlimited duration. Unrecognized builds and editions are left unchanged.
 
-## Installation (scheduled task)
+You can run the one-time mode from your own scheduling system. For continuous monitoring, the installer below provides a dedicated Task Scheduler configuration.
 
-Run the installer **on the WSUS server**, from an elevated **Windows PowerShell 5.1** session. The resulting task runs the main script **in the installation directory**; there is no copy into `Program Files`. When `-InstallPath` is omitted, the installer looks for the main PS1 **next to its own file** (`$PSScriptRoot`), not in the caller's PowerShell working directory (`$PWD`). The installer is the only setup file you need. When the main script is missing it downloads it; when already present it asks `Download the latest version? [Y/n]` (default **Yes**).
+## Install a scheduled task
 
-> **GitHub source:** The installer and quick-install commands are configured to download from [`avmaksimov/Update-WSUSComputerOperatingSystems`](https://github.com/avmaksimov/Update-WSUSComputerOperatingSystems), branch `main`. **Publish the fork with this repository name and branch before using the download commands**; until it is published the URLs may return HTTP 404. Do **not** switch these URLs to the original Borgquite repository because it does not contain the fork's event-driven script. You can still use an already available main script by declining an update, or provide an alternative URL using `-MainScriptUrl`.
+`Install-WSUSComputerOperatingSystems.ps1` creates or updates a scheduled task named **`Update-WSUSComputerOperatingSystems`**, under the Task Scheduler folder you select. It runs the main script **from the chosen installation directory**; the installer itself is not copied there.
 
-### Quick installation (download and run Install)
+The registered task runs as `SYSTEM` with `-AsService`, starts **one minute after system startup**, has no execution time limit, and is also **started immediately after installation**. Task Scheduler uses `MultipleInstances=IgnoreNew` to prevent parallel instances of this task.
 
-These one-liners download **only the installer** into a uniquely named file in `%TEMP%`, execute it, and delete the temporary copy. The installer then downloads/updates the main script into the chosen *permanent* location and registers the scheduled task. The commands do not overwrite an existing main script without the update prompt. Review the downloaded installer before running code obtained from the internet.
+The installer uses the main script already present in the chosen folder or downloads it from the project's `main` branch. If a local copy exists, it asks whether to download the latest version (default **Yes**); answering **No** keeps the local file. The installer validates the downloaded PowerShell syntax and `-AsService` support before replacing an existing file.
 
-**A. Install in the current directory.** First navigate to the desired permanent folder (`Set-Location` or `cd`), then run. The one-liner explicitly passes that folder via `-InstallPath`, because the downloaded installer itself lives in `%TEMP%`:
+**Download source:** The commands below use this repository's `main` branch (`Borgquite/Update-WSUSComputerOperatingSystems`). For development branches, use the corresponding branch or commit URLs instead. Inspect downloaded scripts before executing them.
+
+### Quick installation: one PowerShell command
+
+Run one of the following in an elevated Windows PowerShell 5.1 session. Each command downloads **only the installer** to a uniquely named temporary file, runs it, and removes that temporary copy. The installer obtains the main script separately and registers the task.
+
+**A. Install in the current directory.** First switch to the desired **permanent** directory (for example, `Set-Location 'C:\Scripts\WSUS'`):
 
 ```powershell
-$f=Join-Path $env:TEMP ("WSUS-Install-$([guid]::NewGuid().ToString('N')).ps1"); try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/avmaksimov/Update-WSUSComputerOperatingSystems/main/Install-WSUSComputerOperatingSystems.ps1' -OutFile $f -ErrorAction Stop; & $f -InstallPath (Get-Location).ProviderPath } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+$f=Join-Path $env:TEMP ("WSUS-Install-$([guid]::NewGuid().ToString('N')).ps1"); try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Borgquite/Update-WSUSComputerOperatingSystems/main/Install-WSUSComputerOperatingSystems.ps1' -OutFile $f -ErrorAction Stop; & $f -InstallPath (Get-Location).ProviderPath } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
 ```
 
-**B. Install in an explicitly chosen directory.** Change `C:\Scripts\WSUS` to the desired permanent location; you do not need to `cd` first:
+**B. Install in a specified directory.** Replace `C:\Scripts\WSUS` with your preferred permanent path:
 
 ```powershell
-$f=Join-Path $env:TEMP ("WSUS-Install-$([guid]::NewGuid().ToString('N')).ps1"); try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/avmaksimov/Update-WSUSComputerOperatingSystems/main/Install-WSUSComputerOperatingSystems.ps1' -OutFile $f -ErrorAction Stop; & $f -InstallPath 'C:\Scripts\WSUS' } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+$f=Join-Path $env:TEMP ("WSUS-Install-$([guid]::NewGuid().ToString('N')).ps1"); try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Borgquite/Update-WSUSComputerOperatingSystems/main/Install-WSUSComputerOperatingSystems.ps1' -OutFile $f -ErrorAction Stop; & $f -InstallPath 'C:\Scripts\WSUS' } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
 ```
 
-The URL remains stable as long as the repository uses that branch and file path. If a branch or file is renamed, the URL must be updated. The commands fetch the current branch version, not a pinned release; for repeatable installations use an immutable release tag or commit in the URL.
+The commands track the current `main` branch, not a pinned release. For repeatable deployments, substitute URLs pinned to a specific commit or release tag. Internet access is required for the quick-install commands and for automatic main-script updates.
 
-### Manual installation (two alternatives)
+### Manual installation: two alternatives
 
-Download `Install-WSUSComputerOperatingSystems.ps1` from the fork (or extract this repository ZIP). If the installer is in the intended permanent folder, you can simply run it from anywhere: it locates the main script beside itself. When the installer is in a temporary folder, you must supply a permanent destination (interactively or via `-InstallPath`). The caller's current directory has no influence unless you explicitly pass it with `-InstallPath`.
+Download `Install-WSUSComputerOperatingSystems.ps1` from this repository or download and extract the repository ZIP. You can also use a previously obtained copy of `Update-WSUSComputerOperatingSystems.ps1` to install without downloading the main script again.
 
-**A. Install next to the installer (default):**
+**A. Install alongside the installer:**
 
 ```powershell
-# Run the installer from its permanent folder; the caller's current folder does not matter.
 & 'C:\Scripts\WSUS\Install-WSUSComputerOperatingSystems.ps1'
 ```
 
-If the main script already exists **next to the installer**, the installation-directory question is skipped. If it is missing, the installer offers its own directory as the default; press Enter to accept (unless the installer itself is in a temporary directory).
+By default the installer checks **its own directory** (`$PSScriptRoot`), not the PowerShell working directory (`$PWD`). If the main script is already there, the installer skips the installation-directory question and offers to update the script. If the main script is absent, it asks for a destination and proposes the installer's directory, unless that location is temporary.
 
-**B. Install into a directory supplied explicitly:**
+**B. Install into a different directory:**
 
 ```powershell
 & 'C:\Temp\WSUS\Install-WSUSComputerOperatingSystems.ps1' -InstallPath 'D:\Scripts\WSUS'
 ```
 
-`-InstallPath` bypasses the directory question when it is a valid permanent path. `C:\Temp\WSUS` is only an **example location for the downloaded installer**, not the destination of the long-running script.
+This is useful when the installer was downloaded to a temporary directory. The destination is always `-InstallPath`; the installer's own location is irrelevant when that parameter is supplied.
 
-### Installer prompts and task configuration
+### Installer options and prompts
 
-- If no main PS1 exists in the target directory, download it automatically. Otherwise offer to download the latest version, **Yes** by default; answering **No** keeps the current file.
-- If no `-InstallPath` is passed, look for the main PS1 next to the installer (`$PSScriptRoot`). If missing, ask for a destination, offering the **installer's directory** as the default.
-- If a temporary location is selected (`%TEMP%`, `%TMP%`, `C:\Temp`, etc.), require a different, permanent destination. An empty response is not accepted while the default is temporary. A temporary copy of **Install** itself is allowed.
-- Ask for `Task Scheduler folder (leave empty for root)`. Enter creates the task under `\`; entering `MP` creates/uses `\MP\`. To skip this prompt pass `-TaskPath '\MP'`.
-- Show installation summary and ask for confirmation. Existing task is only updated after explicit confirmation; tasks of the same name elsewhere are warned about but not modified.
-- Only the project task **`Update-WSUSComputerOperatingSystems`** is created or updated. It does not replace your preexisting `WSUS Update Operating Systems` task.
-- Download the main script to a temporary stage, check PowerShell syntax and `-AsService` support, and replace it only after confirmation. A task that is currently running is stopped before reconfiguration and **restarted afterwards**. A newly created task is **started immediately** after registration (in addition to its startup trigger).
-- Register the task under `SYSTEM`, startup trigger delayed by one minute, unlimited execution time and restart-on-failure. The task action runs `Update-WSUSComputerOperatingSystems.ps1 -AsService` from the chosen permanent directory.
-- The installer does not copy itself into the installation directory. Uninstall removes **only the scheduled task**, leaving all files and logs untouched.
+- **Installation directory:** prompt only if needed and `-InstallPath` was not supplied. Temporary destinations (`%TEMP%`, `%TMP%`, `C:\Temp` and similar paths) are rejected; a permanent path must be specified.
+- **Task Scheduler folder:** `Task Scheduler folder (leave empty for root)`; blank means `\`, while `MP` means `\MP\`. Pass `-TaskPath '\MP'` to choose a folder without prompting. Missing Scheduler folders are created.
+- **Confirmation:** the installer shows the full configuration and asks before creating or updating a task. It will not silently replace an unrelated task with the same name.
+- **Existing tasks:** if this task is already running, the installer stops it before applying changes and starts it again afterward. Other tasks with the same name in different Task Scheduler folders are reported but not modified.
+- **Script files:** the main script is downloaded only when missing or when its update is accepted. The installer itself is not copied to the target folder. Missing permanent installation directories are created as necessary.
 
-To specify a different Task Scheduler folder or SQL settings without extra prompts:
+Example with custom installation and Scheduler folders:
 
 ```powershell
 .\Install-WSUSComputerOperatingSystems.ps1 -InstallPath 'C:\Scripts\WSUS' -TaskPath '\MP'
+```
+
+Example for an external SQL Server:
+
+```powershell
 .\Install-WSUSComputerOperatingSystems.ps1 -InstallPath 'C:\Scripts\WSUS' -TaskPath '\MP' -SQLServerInstance 'SQLSERVER\INSTANCE' -Encrypt Mandatory
 ```
 
-The installer requests a task start immediately after successful registration. Check the log for startup and SQL access under `SYSTEM`. To start the task again manually:
+To check or manually start the task after installation:
 
 ```powershell
-Start-ScheduledTask -TaskPath '\MP' -TaskName 'Update-WSUSComputerOperatingSystems'
+Get-ScheduledTask -TaskPath '\MP\' -TaskName 'Update-WSUSComputerOperatingSystems'
+Get-ScheduledTaskInfo -TaskPath '\MP\' -TaskName 'Update-WSUSComputerOperatingSystems'
+Start-ScheduledTask -TaskPath '\MP\' -TaskName 'Update-WSUSComputerOperatingSystems'
 ```
 
-To remove the task (leave script files untouched):
+To remove **only the scheduled task**, leaving the script and its log in place:
 
 ```powershell
 .\Install-WSUSComputerOperatingSystems.ps1 -Uninstall -TaskPath '\MP'
 ```
 
-**Security:** The installer must run elevated because it registers a SYSTEM task. Restrict write access to the permanent installation directory: anybody who can replace the main PS1 can control code executed as SYSTEM. Review remote code and validate its source. No scripts are downloaded when you decline an update and already have the main PS1.
-
-## How the listener works
-
-1. Load the OS catalog (the catalog's current OS/build/SKU combinations).
-2. In one-shot mode, read all `tbComputerTargetDetail` rows and update only incorrectly labelled entries.
-3. In `-AsService` mode, register `SqlDependency` **before** initial reconciliation to avoid missing concurrent WSUS writes.
-4. On SQL notification, register the next notification before processing changes. Compare the previous and current snapshots by numeric `TargetID`, and check OS/build/SKU fields before writing.
-5. Own SQL `UPDATE` statements may also fire notifications. The next pass performs **no UPDATE** if the description already matches the catalog.
-6. On an SQL error, stop the current listener, wait 15 seconds, reconnect and recheck the entire table.
-
-No triggers are added to SUSDB, and the tool never manually cleans up SqlDependency's Service Broker objects. No mutex is used. Keep a single active event listener through the Task Scheduler setting `MultipleInstances=IgnoreNew`; if you also have the older periodic task, disable it to avoid unnecessary concurrent updates.
+**Note for existing installations:** This installer does not alter the previous task named `WSUS Update Operating Systems`. If you already run that original daily task, review and disable it separately if switching to continuous monitoring.
 
 ## Logging
 
-The log is stored **next to the main script** as `Update-WSUSComputerOperatingSystems.log`, independently of the Task Scheduler folder. For example, when installed in `C:\Scripts\Update-WSUSComputerOperatingSystems`, the log is `C:\Scripts\Update-WSUSComputerOperatingSystems\Update-WSUSComputerOperatingSystems.log`. The installer prints the actual path after registration.
+The main script appends logs to **`Update-WSUSComputerOperatingSystems.log` alongside its own `.ps1` file**. For an installation in `C:\Scripts\WSUS`, the log path is `C:\Scripts\WSUS\Update-WSUSComputerOperatingSystems.log`.
 
-Each line uses the local server's time in the format `dd.MM.yyyy HH:mm:ss.fff [LEVEL] Message` with `INFO`, `WARNING`, or `ERROR` levels. Example:
+Log lines use local server time with millisecond precision and the format `dd.MM.yyyy HH:mm:ss.fff [LEVEL] Message`:
 
 ```text
-24.10.2026 21:57:34.345 [INFO] Catalog loaded: 1094 combinations. Mode=SERVICE.
-24.10.2026 21:57:34.678 [ERROR] SQL/listener error: ...; reconnecting in 15 seconds.
+25.10.2026 16:23:34.075 [INFO] Catalog loaded: 1094 combinations. Mode=SERVICE.
+25.10.2026 16:23:34.278 [INFO] UPDATED INITIAL example-pc.contoso.com [14] Build=26200; OS=Windows 10 Pro -> Windows 11 Pro 25H2
+25.10.2026 16:23:34.325 [INFO] Affected=97; wrong=12; updated=12
 ```
 
-The main script **appends only**: it never rotates, truncates or removes the log. Arrange retention or rotation externally if needed. Persistent connection failures can produce log lines every 15 seconds. Messages include catalog load, actual fixes, SQL errors and reconnects; no-op notifications are not logged. The log is created when the main script runs, not by Install. The script runs as `SYSTEM` under Task Scheduler and needs write access to its directory.
+Levels are `INFO`, `WARNING`, and `ERROR`. Only actual fixes and relevant listener/SQL conditions are logged; routine no-op notifications do not produce an entry. The log is created when the main script runs, not by the installer. **No internal log rotation or truncation** is performed; configure retention or rotation externally if necessary. Ensure the task account can write to the installation directory.
 
-To follow the log (adjust the path to your installation directory):
+Follow the log in PowerShell:
 
 ```powershell
-Get-Content 'C:\Scripts\Update-WSUSComputerOperatingSystems\Update-WSUSComputerOperatingSystems.log' -Tail 30 -Wait
+Get-Content 'C:\Scripts\WSUS\Update-WSUSComputerOperatingSystems.log' -Tail 30 -Wait
 ```
 
-## Validation before production
+## How event-driven monitoring works
 
-Use a current backup of SUSDB. On your target server, verify these steps:
+1. Generate the name catalog using the script's OS version and SKU mappings.
+2. Register SQL Query Notifications before the initial database reconciliation to avoid missing concurrent changes.
+3. Read the current computer details and repair incorrect names where the build/SKU matches a known catalog entry.
+4. When an event arrives, re-register the next notification and compare the new snapshot with the previous one. Check that the database row still matches before issuing an `UPDATE`.
+5. Ignore already-correct descriptions and redundant notifications, including notifications caused by the script's own updates.
+6. If the listener or SQL connection fails, log the error, wait 15 seconds, reconnect and perform a full reconciliation.
 
-1. Run without `-AsService`; inspect the log and WSUS console. Run it a second time: it should make zero updates.
-2. Start `-AsService -DurationMinutes 60`; wait for the WSUS client reporting cycle, and check that overwritten OS names are repaired.
-3. Check the automatically started task under `SYSTEM` after installation (including access to WID and `SqlDependency`).
-4. Restart the WID service during a maintenance window and confirm that the listener reconnects and checks all rows again.
-5. Test Ctrl+C and a forced shutdown followed by an immediate restart.
-6. Confirm the preexisting task `WSUS Update Operating Systems`, if any, remains unchanged, and disable it separately when appropriate.
+No database triggers are installed. The listener relies on Service Broker / `SqlDependency`; it does not install or clean up Service Broker infrastructure itself.
 
-## Attribution and license
+## Tests and production validation
 
-Original mappings and purpose: [Borgquite/Update-WSUSComputerOperatingSystems](https://github.com/Borgquite/Update-WSUSComputerOperatingSystems). Event-based behavior: `Watch-WSUSOS-AutoFix-v1.1.ps1` prototype. Distributed under the **GNU General Public License version 3**; see `LICENSE`.
-
-This folder contains replacement files to copy into a *real GitHub fork* of the original repository; it is not itself a Git repository with upstream history. Preserve the original repository history when publishing, and do not push without the repository owner's authorization.
-
-### Offline catalog check
-
-Before using the main script against SUSDB, you can run:
+The offline test is located at `tests/Test-WSUSCatalog.ps1`:
 
 ```powershell
 .\tests\Test-WSUSCatalog.ps1
 ```
 
-This parses the script and evaluates **only** the built-in catalog definitions and functions; it performs no SQL reads or writes. It reports the current catalog size (without hardcoding 1094), validates representative Windows 10/11/Server/Azure Stack HCI mappings, and uses stubbed SQL/logging functions to test initial reconciliation, unchanged notifications, correction after WSUS overwrites, build changes and concurrent UPDATE skips. It also checks for critical SQL guards. **The main script is not executed.** The test does not need WSUS or a connection to SUSDB.
+It validates the OS catalog and representative mappings as well as the correction logic using mocked SQL and logging operations. It **does not connect to SUSDB or modify WSUS**. The test does not require a WSUS installation.
 
-## Additional production checks
+Before putting the event-driven task into production, also verify:
 
-- **The main script retains the last tested structured OS catalog and SQL event/update logic; only its logging has changed in this package.** The old draft ZIP contains a different catalog layout; do not replace the script with that older draft.
-- Validate the installer/task **under SYSTEM**, not just from an elevated interactive shell. Check `Update-WSUSComputerOperatingSystems.log` in the main script directory after manual task start.
-- Use only one ongoing `-AsService` task. `Get-ScheduledTask -TaskName 'WSUS*'` helps locate older scheduled tasks, but inspect them before disabling anything.
-- A 60-minute `-AsService` test confirms startup and idle waiting; also verify that an actual client OSDescription overwrite is corrected.
-- Check that the WID Service Broker notification feature remains enabled in SUSDB. The script assumes it, rather than enabling it automatically.
-- The current listener retries an SQL connection failure every 15 seconds; persistent failures are logged and not reported through Task Scheduler because the service process remains running.
-- The SQL updates are direct SUSDB changes, not a supported WSUS management API. Keep a verified backup and check operation after WSUS upgrades.
+1. A one-time run completes successfully and a second run does not repeat successful updates.
+2. `-AsService -DurationMinutes 60` works on your server and corrects at least one **newly changed** description, not only the initial scan.
+3. The installed scheduled task can connect to `SUSDB` as `SYSTEM` and starts after reboot.
+4. The listener reconnects after a planned WID/SQL Server service restart.
+5. The installed folder's write permissions are limited to trusted administrators: modification of the `.ps1` file allows code to execute as `SYSTEM`.
+
+## License
+
+The project is distributed under the **GNU General Public License version 3**. See [LICENSE](LICENSE).
+
+Legal notice: This script is provided without any warranty; without even the implied warranty of merchantability or fitness for a particular purpose. In no event shall the author or contributors be liable for any damages arising from its use. This script is provided "as is".
