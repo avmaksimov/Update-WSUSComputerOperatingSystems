@@ -87,8 +87,8 @@ If the main script already exists **next to the installer**, the installation-di
 - If no main PS1 exists in the target directory, download it automatically. Otherwise offer to download the latest version, **Yes** by default; answering **No** keeps the current file.
 - If no `-InstallPath` is passed, look for the main PS1 next to the installer (`$PSScriptRoot`). If missing, ask for a destination, offering the **installer's directory** as the default.
 - If a temporary location is selected (`%TEMP%`, `%TMP%`, `C:\Temp`, etc.), require a different, permanent destination. An empty response is not accepted while the default is temporary. A temporary copy of **Install** itself is allowed.
-- Ask for `Task Scheduler folder (leave empty for root)`. Enter creates the task under `\`; entering `MP` creates/uses `\MP\`. To skip this prompt pass `-TaskPath '\MP'`.
-- Show installation summary and ask for confirmation. Existing task is only updated after explicit confirmation; tasks of the same name elsewhere are warned about but not modified.
+- Automatically find the existing project task across all Task Scheduler folders. With one match, reuse its folder; with no matching tasks, install in the root (`\`). If more than one project task is found, specify `-TaskPath` explicitly. Unrelated same-name tasks are never modified.
+- Show installation summary and ask for confirmation. An existing task is updated only after explicit confirmation. If no project task matches but an unrelated task has the same name, stop and require an explicit `-TaskPath`. Other same-name tasks are reported but not modified.
 - Only the project task **`Update-WSUSComputerOperatingSystems`** is created or updated. It does not replace your preexisting `WSUS Update Operating Systems` task.
 - Download the main script to a temporary stage, check PowerShell syntax and `-AsService` support, and replace it only after confirmation. A task that is currently running is stopped before reconfiguration and **restarted afterwards**. A newly created task is **started immediately** after registration (in addition to its startup trigger).
 - Register the task under `SYSTEM`, startup trigger delayed by one minute, unlimited execution time and restart-on-failure. The task action runs `Update-WSUSComputerOperatingSystems.ps1 -AsService` from the chosen permanent directory.
@@ -107,11 +107,13 @@ The installer requests a task start immediately after successful registration. C
 Start-ScheduledTask -TaskPath '\MP' -TaskName 'Update-WSUSComputerOperatingSystems'
 ```
 
-To remove the task (leave script files untouched):
+To remove the task (leave script files untouched), its Task Scheduler folder is detected automatically if there is exactly one matching project task:
 
 ```powershell
-.\Install-WSUSComputerOperatingSystems.ps1 -Uninstall -TaskPath '\MP'
+.\Install-WSUSComputerOperatingSystems.ps1 -Uninstall
 ```
+
+Specify `-TaskPath '\MP'` only if multiple project tasks exist or you want to target a particular folder.
 
 **Security:** The installer must run elevated because it registers a SYSTEM task. Restrict write access to the permanent installation directory: anybody who can replace the main PS1 can control code executed as SYSTEM. Review remote code and validate its source. No scripts are downloaded when you decline an update and already have the main PS1.
 

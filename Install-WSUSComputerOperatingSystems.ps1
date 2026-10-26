@@ -13,6 +13,8 @@
 .EXAMPLE
     .\Install-WSUSComputerOperatingSystems.ps1 -InstallPath 'D:\Scripts\WSUS' -TaskPath '\MP\'
 .EXAMPLE
+    .\Install-WSUSComputerOperatingSystems.ps1 -Uninstall
+.EXAMPLE
     .\Install-WSUSComputerOperatingSystems.ps1 -Uninstall -TaskPath '\MP\'
 #>
 [CmdletBinding()]
@@ -144,6 +146,38 @@ function Test-OurScheduledTask {
         ($actions[0].Arguments -match '(?i)Update-WSUSComputerOperatingSystems(-Event)?\.ps1'))
 }
 
+function Resolve-TaskPath {
+    param(
+        [string]$RequestedPath,
+        [bool]$TaskPathSpecified,
+        [bool]$ForUninstall = $false
+    )
+
+    if ($TaskPathSpecified) { return Normalize-TaskPath $RequestedPath }
+
+    # Search all Task Scheduler folders; never select an ambiguous or unrelated task.
+    $tasks = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+    $projectTasks = @($tasks | Where-Object { Test-OurScheduledTask $_ })
+
+    if ($projectTasks.Count -gt 1) {
+        $paths = ($projectTasks | ForEach-Object { $_.TaskPath + $_.TaskName }) -join ', '
+        throw "Multiple project tasks found: $paths. Specify -TaskPath explicitly."
+    }
+    if ($projectTasks.Count -eq 1) {
+        $foundPath = Normalize-TaskPath $projectTasks[0].TaskPath
+        Write-Host "Found existing project task: $foundPath$TaskName"
+        return $foundPath
+    }
+    if ($tasks.Count -gt 0) {
+        $paths = ($tasks | ForEach-Object { $_.TaskPath + $_.TaskName }) -join ', '
+        throw "Task name '$TaskName' is already used by unrelated task(s): $paths. Specify -TaskPath explicitly."
+    }
+
+    if ($ForUninstall) { return $null }
+    Write-Host 'No existing project task found. Using Task Scheduler root folder.'
+    return '\'
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -152,10 +186,11 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 if ($SQLServerInstance -match '["\r\n]' -or $Encrypt -match '["\r\n]') { throw 'Invalid SQL connection parameter.' }
 
 if ($Uninstall) {
-    if (-not $PSBoundParameters.ContainsKey('TaskPath')) {
-        $TaskPath = Read-Host 'Task Scheduler folder (leave empty for root)'
+    $TaskPath = Resolve-TaskPath -RequestedPath $TaskPath -TaskPathSpecified ($PSBoundParameters.ContainsKey('TaskPath')) -ForUninstall $true
+    if ($null -eq $TaskPath) {
+        Write-Host "Task not found: $TaskName"
+        return
     }
-    $TaskPath = Normalize-TaskPath $TaskPath
     $existing = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
     if (-not $existing) {
         Write-Host "Task not found: $TaskPath$TaskName"
@@ -182,10 +217,7 @@ if ($localExists) {
     Write-Host "Main script not found: $destination"
 }
 
-if (-not $PSBoundParameters.ContainsKey('TaskPath')) {
-    $TaskPath = Read-Host 'Task Scheduler folder (leave empty for root)'
-}
-$TaskPath = Normalize-TaskPath $TaskPath
+$TaskPath = Resolve-TaskPath -RequestedPath $TaskPath -TaskPathSpecified ($PSBoundParameters.ContainsKey('TaskPath'))
 $existing = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
 
 # Only modify a previously installed task if its action points to this project.

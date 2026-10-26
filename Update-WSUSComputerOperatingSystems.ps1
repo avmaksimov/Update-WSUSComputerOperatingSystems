@@ -323,6 +323,7 @@ $OSDescriptions = @(
             # Based on https://learn.microsoft.com/en-us/mem/intune/fundamentals/filters-device-properties
             # Based on https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getproductinfo
             # Based on https://betawiki.net/wiki/List_of_Windows_product_types
+            # LTSC editions are omitted to preserve client-reported release-year names.
             @{
                 ProductEdition = ' S'
                 NewProductTypes = @(178)
@@ -392,22 +393,6 @@ $OSDescriptions = @(
                 NewProductTypes = @(84)
             }
             @{
-                ProductEdition = ' Enterprise LTSC'
-                NewProductTypes = @(125)
-            }
-            @{
-                ProductEdition = ' Enterprise LTSC Evaluation'
-                NewProductTypes = @(129)
-            }
-            @{
-                ProductEdition = ' Enterprise LTSC N'
-                NewProductTypes = @(126)
-            }
-            @{
-                ProductEdition = ' Enterprise LTSC N Evaluation'
-                NewProductTypes = @(130)
-            }
-            @{
                 ProductEdition = ' Holographic'
                 NewProductTypes = @(135)
             }
@@ -426,10 +411,6 @@ $OSDescriptions = @(
             @{
                 ProductEdition = ' IoT Enterprise'
                 NewProductTypes = @(188)
-            }
-            @{
-                ProductEdition = ' IoT Enterprise LTSC'
-                NewProductTypes = @(191)
             }
             @{
                 ProductEdition = ' Mobile'
@@ -774,6 +755,12 @@ function Start-Listener {
 }
 
 try {
+    # Separate each new run from existing log entries.
+    if ((Test-Path -LiteralPath $logFile -PathType Leaf) -and
+        (Get-Item -LiteralPath $logFile).Length -gt 0) {
+        Add-Content -LiteralPath $logFile -Value '' -Encoding UTF8
+    }
+    if ($AsService) { Write-Log 'Service starting...' }
     $lookup = New-NameCatalog
     Write-Log "Catalog loaded: $($lookup.Count) combinations. Mode=$(if ($AsService) { 'SERVICE' } else { 'ONCE' })."
 
@@ -782,6 +769,7 @@ try {
         Process-Changes -Before @{} -After $initial -Lookup $lookup -InitialReason 'INITIAL'
     } else {
         $hadConnection = $false
+        $serviceStarted = $false
         while ($null -eq $endTime -or (Get-Date) -lt $endTime) {
             try {
                 Start-Listener
@@ -790,6 +778,10 @@ try {
                 if ($hadConnection) { Write-Log 'SQL connection restored; full reconciliation.' }
                 $hadConnection = $true
                 Process-Changes -Before @{} -After $previous -Lookup $lookup -InitialReason 'INITIAL'
+                if (-not $serviceStarted) {
+                    Write-Log 'Service started.'
+                    $serviceStarted = $true
+                }
                 while ($null -eq $endTime -or (Get-Date) -lt $endTime) {
                     $notification = Wait-Event -SourceIdentifier $eventName -Timeout 10
                     if ($null -eq $notification) { continue }
@@ -814,7 +806,8 @@ try {
             finally { Stop-Listener }
         }
     }
-    Write-Log 'Finished.'
+    if ($AsService) { Write-Log 'Service stopped.' }
+    else { Write-Log 'Finished.' }
 }
 catch {
     Write-Log $_.Exception.Message -Level ERROR
