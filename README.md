@@ -2,9 +2,11 @@
 
 **Language:** **English** | [Русский](README.ru.md)
 
-This project is based on [Borgquite/Update-WSUSComputerOperatingSystems](https://github.com/Borgquite/Update-WSUSComputerOperatingSystems) and preserves its operating-system/build/edition mappings. It adds an optional event-driven mode that repairs Windows Server Update Services (WSUS) `OSDescription` values after clients overwrite them.
+This fork builds on [Borgquite/Update-WSUSComputerOperatingSystems](https://github.com/Borgquite/Update-WSUSComputerOperatingSystems) and retains its operating-system/build/edition mappings. **The event-driven monitoring and logging enhancements were developed in this fork.**
 
-The event listener is based on a tested `Watch-WSUSOS-AutoFix-v1.1.ps1` prototype. **No `SqlServer` PowerShell module, NuGet provider, or other third-party runtime dependency is required.** The code uses `System.Data.SqlClient` from the .NET Framework available to Windows PowerShell 5.1.
+The fork adds continuous WSUS `OSDescription` monitoring through SQL Query Notifications (`SqlDependency`), automatic correction when WSUS clients overwrite OS names, SQL reconnection, a Task Scheduler installer and configurable local or UNC logging with local error diagnostics. The listener runs in `-AsService` mode; a one-time scan is also available.
+
+**No `SqlServer` PowerShell module, NuGet provider, or other third-party runtime dependency is required.** The implementation uses `System.Data.SqlClient` from the .NET Framework available to Windows PowerShell 5.1.
 
 > **Warning:** This utility directly updates the WSUS `SUSDB` database, which is not an officially supported Microsoft WSUS management API. Make a verified backup before deployment. Run and validate on a noncritical environment first. Provided without warranty under GPL-3.0.
 
@@ -182,9 +184,11 @@ Use a current backup of SUSDB. On your target server, verify these steps:
 
 ## Attribution and license
 
-Original mappings and purpose: [Borgquite/Update-WSUSComputerOperatingSystems](https://github.com/Borgquite/Update-WSUSComputerOperatingSystems). Event-based behavior: `Watch-WSUSOS-AutoFix-v1.1.ps1` prototype. Distributed under the **GNU General Public License version 3**; see `LICENSE`.
+**Original project and OS catalog:** [Borgquite/Update-WSUSComputerOperatingSystems](https://github.com/Borgquite/Update-WSUSComputerOperatingSystems).
 
-This folder contains replacement files to copy into a *real GitHub fork* of the original repository; it is not itself a Git repository with upstream history. Preserve the original repository history when publishing, and do not push without the repository owner's authorization.
+**Enhancements implemented in this fork:** event-driven SQL monitoring and OS-description correction, reconnection handling, automated Task Scheduler setup, and configurable logging (including local diagnostics for logging errors).
+
+The project retains the original attribution and is distributed under the **GNU General Public License version 3**; see `LICENSE`.
 
 ### Offline catalog check
 
@@ -198,7 +202,6 @@ This parses the script and evaluates **only** the built-in catalog definitions a
 
 ## Additional production checks
 
-- **The main script retains the last tested structured OS catalog and SQL event/update logic; only its logging has changed in this package.** The old draft ZIP contains a different catalog layout; do not replace the script with that older draft.
 - Validate the installer/task **under SYSTEM**, not just from an elevated interactive shell. Check `Update-WSUSComputerOperatingSystems.log` in the configured log directory after manual task start (and `Update-WSUSComputerOperatingSystems_errors.log` beside the script if a write failed).
 - Use only one ongoing `-AsService` task. `Get-ScheduledTask -TaskName 'WSUS*'` helps locate older scheduled tasks, but inspect them before disabling anything.
 - A 60-minute `-AsService` test confirms startup and idle waiting; also verify that an actual client OSDescription overwrite is corrected.

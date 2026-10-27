@@ -7,8 +7,9 @@
 .SYNOPSIS
     Fix WSUS OS descriptions once, or continuously using SQL Query Notifications.
 .DESCRIPTION
-    Based on Borgquite/Update-WSUSComputerOperatingSystems (GPL-3.0).
-    Event-driven implementation adapted from Watch-WSUSOS-AutoFix-v1.1.ps1.
+    Builds on Borgquite/Update-WSUSComputerOperatingSystems (GPL-3.0)
+    and retains its OS catalog. This fork adds event-driven monitoring via
+    SqlDependency, automatic SQL reconnection and configurable log storage.
     No SqlServer module or other external PowerShell dependency is needed.
 .EXAMPLE
     .\Update-WSUSComputerOperatingSystems.ps1
