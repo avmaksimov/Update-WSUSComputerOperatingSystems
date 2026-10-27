@@ -1,5 +1,7 @@
 # Update-WSUSComputerOperatingSystems — event-driven fork
 
+**Language:** **English** | [Русский](README.ru.md)
+
 This project is based on [Borgquite/Update-WSUSComputerOperatingSystems](https://github.com/Borgquite/Update-WSUSComputerOperatingSystems) and preserves its operating-system/build/edition mappings. It adds an optional event-driven mode that repairs Windows Server Update Services (WSUS) `OSDescription` values after clients overwrite them.
 
 The event listener is based on a tested `Watch-WSUSOS-AutoFix-v1.1.ps1` prototype. **No `SqlServer` PowerShell module, NuGet provider, or other third-party runtime dependency is required.** The code uses `System.Data.SqlClient` from the .NET Framework available to Windows PowerShell 5.1.
