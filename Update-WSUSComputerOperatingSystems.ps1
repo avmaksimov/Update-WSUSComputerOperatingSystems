@@ -16,13 +16,16 @@
     .\Update-WSUSComputerOperatingSystems.ps1 -AsService
 .EXAMPLE
     .\Update-WSUSComputerOperatingSystems.ps1 -AsService -DurationMinutes 60
+.EXAMPLE
+    .\Update-WSUSComputerOperatingSystems.ps1 -AsService -LogDirectory '\\server\share\_Logs'
 #>
 [CmdletBinding()]
 param(
     [Parameter()][string]$SQLServerInstance = '\\.\pipe\MICROSOFT##WID\tsql\query',
     [Parameter()][ValidateSet('Optional','Mandatory','True','False')][string]$Encrypt = 'Optional',
     [Parameter()][switch]$AsService,
-    [Parameter()][ValidateRange(0,43200)][int]$DurationMinutes = 0
+    [Parameter()][ValidateRange(0,43200)][int]$DurationMinutes = 0,
+    [Parameter()][string]$LogDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -566,9 +569,33 @@ $builder['Application Name'] = 'WSUS-OS-EventFix'
 $builder['Encrypt'] = ($Encrypt -eq 'Mandatory' -or $Encrypt -eq 'True')
 $connectionString = $builder.ConnectionString
 $eventName = 'WSUS.OS.EventFix.Change'
-$logFile = Join-Path $PSScriptRoot 'Update-WSUSComputerOperatingSystems.log'
+# With no -LogDirectory (or an empty one), keep the original local log location.
+$logDirectory = if ([string]::IsNullOrWhiteSpace($LogDirectory)) { $PSScriptRoot } else { $LogDirectory.Trim().Trim('"') }
+$logFile = Join-Path $logDirectory 'Update-WSUSComputerOperatingSystems.log'
+$localErrorFile = Join-Path $PSScriptRoot 'Update-WSUSComputerOperatingSystems_errors.log'
+$separateLocalErrors = -not ([IO.Path]::GetFullPath($logFile)).Equals(
+    [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Update-WSUSComputerOperatingSystems.log')),
+    [StringComparison]::OrdinalIgnoreCase)
+$logRunSeparated = $false
+$localErrorsSeparated = $false
 $endTime = if ($AsService -and $DurationMinutes -gt 0) { (Get-Date).AddMinutes($DurationMinutes) } else { $null }
 $listenerStarted = $false
+
+function Write-LocalError {
+    param([Parameter(Mandatory = $true)][string]$Line)
+    try {
+        if (-not $script:localErrorsSeparated) {
+            if ((Test-Path -LiteralPath $localErrorFile -PathType Leaf -ErrorAction Stop) -and
+                (Get-Item -LiteralPath $localErrorFile -ErrorAction Stop).Length -gt 0) {
+                Add-Content -LiteralPath $localErrorFile -Value '' -Encoding UTF8 -ErrorAction Stop
+            }
+            $script:localErrorsSeparated = $true
+        }
+        Add-Content -LiteralPath $localErrorFile -Value $Line -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-Warning ('Unable to write the local error log: ' + $_.Exception.Message)
+    }
+}
 
 function Write-Log {
     param(
@@ -577,7 +604,28 @@ function Write-Log {
     )
     $line = '{0} [{1}] {2}' -f (Get-Date -Format 'dd.MM.yyyy HH:mm:ss.fff'), $Level, $Message
     Write-Host $line
-    Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
+    # Keep warnings and errors locally even when the main log is on a share.
+    if ($Level -ne 'INFO' -and $separateLocalErrors) { Write-LocalError $line }
+    try {
+        if (-not $script:logRunSeparated) {
+            if (-not (Test-Path -LiteralPath $logDirectory -PathType Container -ErrorAction Stop)) {
+                New-Item -ItemType Directory -Path $logDirectory -Force -ErrorAction Stop | Out-Null
+            }
+            if ((Test-Path -LiteralPath $logFile -PathType Leaf -ErrorAction Stop) -and
+                (Get-Item -LiteralPath $logFile -ErrorAction Stop).Length -gt 0) {
+                Add-Content -LiteralPath $logFile -Value '' -Encoding UTF8 -ErrorAction Stop
+            }
+            $script:logRunSeparated = $true
+        }
+        Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        $diagnostic = '{0} [ERROR] Cannot write log {1}: {2}; entry: {3}' -f
+            (Get-Date -Format 'dd.MM.yyyy HH:mm:ss.fff'), $logFile, $_.Exception.Message, $line
+        Write-Warning $diagnostic
+        # Only errors and failures are written next to the script, not a copy of the whole log.
+        if (-not ($Level -ne 'INFO' -and $separateLocalErrors)) { Write-LocalError $line }
+        Write-LocalError $diagnostic
+    }
 }
 
 function Set-SqlNotificationOptions([System.Data.SqlClient.SqlConnection]$Connection) {
@@ -755,11 +803,7 @@ function Start-Listener {
 }
 
 try {
-    # Separate each new run from existing log entries.
-    if ((Test-Path -LiteralPath $logFile -PathType Leaf) -and
-        (Get-Item -LiteralPath $logFile).Length -gt 0) {
-        Add-Content -LiteralPath $logFile -Value '' -Encoding UTF8
-    }
+    # The first Write-Log separates a new run from existing entries when possible.
     if ($AsService) { Write-Log 'Service starting...' }
     $lookup = New-NameCatalog
     Write-Log "Catalog loaded: $($lookup.Count) combinations. Mode=$(if ($AsService) { 'SERVICE' } else { 'ONCE' })."

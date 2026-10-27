@@ -35,13 +35,13 @@ By default, `-SQLServerInstance` is the local WID named pipe `\\.\pipe\MICROSOFT
 .\Update-WSUSComputerOperatingSystems.ps1 -SQLServerInstance 'SQLSERVER\INSTANCE' -AsService
 ```
 
-`-Encrypt Optional` is the default (ADO.NET `Encrypt=False`); `-Encrypt Mandatory` enables ADO.NET `Encrypt=True` and requires a trusted server certificate. `True` and `False` are also accepted. `-DurationMinutes` is only valid with `-AsService`; zero means no time limit. All known client and server OS editions are processed. Unknown builds/SKUs are left untouched.
+`-Encrypt Optional` is the default (ADO.NET `Encrypt=False`); `-Encrypt Mandatory` enables ADO.NET `Encrypt=True` and requires a trusted server certificate. `True` and `False` are also accepted. `-DurationMinutes` is only valid with `-AsService`; zero means no time limit. Known client and server OS editions are processed except excluded LTSC editions. Unknown builds/SKUs are left untouched.
 
 ## Installation (scheduled task)
 
 Run the installer **on the WSUS server**, from an elevated **Windows PowerShell 5.1** session. The resulting task runs the main script **in the installation directory**; there is no copy into `Program Files`. When `-InstallPath` is omitted, the installer looks for the main PS1 **next to its own file** (`$PSScriptRoot`), not in the caller's PowerShell working directory (`$PWD`). The installer is the only setup file you need. When the main script is missing it downloads it; when already present it asks `Download the latest version? [Y/n]` (default **Yes**).
 
-> **GitHub source:** The installer and quick-install commands are configured to download from [`avmaksimov/Update-WSUSComputerOperatingSystems`](https://github.com/avmaksimov/Update-WSUSComputerOperatingSystems), branch `main`. **Publish the fork with this repository name and branch before using the download commands**; until it is published the URLs may return HTTP 404. Do **not** switch these URLs to the original Borgquite repository because it does not contain the fork's event-driven script. You can still use an already available main script by declining an update, or provide an alternative URL using `-MainScriptUrl`.
+> **GitHub source:** The installer and quick-install commands download from [`avmaksimov/Update-WSUSComputerOperatingSystems`](https://github.com/avmaksimov/Update-WSUSComputerOperatingSystems), branch `main`. **Verify that this branch contains the updated installer and main script before using the download commands.** Local modifications are not automatically published to GitHub. To test your edited local main script, answer **No** to `Download the latest version?`, or provide an alternative trusted URL with `-MainScriptUrl`. Do not switch download URLs to the original Borgquite repository unless it contains the required event-driven changes.
 
 ### Quick installation (download and run Install)
 
@@ -88,10 +88,13 @@ If the main script already exists **next to the installer**, the installation-di
 - If no `-InstallPath` is passed, look for the main PS1 next to the installer (`$PSScriptRoot`). If missing, ask for a destination, offering the **installer's directory** as the default.
 - If a temporary location is selected (`%TEMP%`, `%TMP%`, `C:\Temp`, etc.), require a different, permanent destination. An empty response is not accepted while the default is temporary. A temporary copy of **Install** itself is allowed.
 - Automatically find the existing project task across all Task Scheduler folders. With one match, reuse its folder; with no matching tasks, install in the root (`\`). If more than one project task is found, specify `-TaskPath` explicitly. Unrelated same-name tasks are never modified.
+- **Log directory:** on a first install, ask where to write `Update-WSUSComputerOperatingSystems.log`, suggesting the permanent main-script directory. Press **Enter** or submit an empty value to use that directory; the installer reports the fallback. A local absolute directory or UNC share path is supported.
+- **Upgrade from an older task without `-LogDirectory`:** ask for the directory **once**, using the permanent main-script directory as default. Once confirmed, the installer stores `-LogDirectory "..."` in the task action.
+- **Subsequent updates:** when the task already contains `-LogDirectory`, read and retain it **without prompting** and display it in `Installation summary`. An explicit `-LogDirectory` installer argument overrides the saved setting (an empty string resets to the main-script directory).
 - Show installation summary and ask for confirmation. An existing task is updated only after explicit confirmation. If no project task matches but an unrelated task has the same name, stop and require an explicit `-TaskPath`. Other same-name tasks are reported but not modified.
 - Only the project task **`Update-WSUSComputerOperatingSystems`** is created or updated. It does not replace your preexisting `WSUS Update Operating Systems` task.
-- Download the main script to a temporary stage, check PowerShell syntax and `-AsService` support, and replace it only after confirmation. A task that is currently running is stopped before reconfiguration and **restarted afterwards**. A newly created task is **started immediately** after registration (in addition to its startup trigger).
-- Register the task under `SYSTEM`, startup trigger delayed by one minute, unlimited execution time and restart-on-failure. The task action runs `Update-WSUSComputerOperatingSystems.ps1 -AsService` from the chosen permanent directory.
+- Download the main script to a temporary stage, check PowerShell syntax and support for both `-AsService` and `-LogDirectory`, and replace it only after confirmation. A task that is currently running is stopped before reconfiguration and **restarted afterwards**. A newly created task is **started immediately** after registration (in addition to its startup trigger).
+- Register the task under `SYSTEM`, startup trigger delayed by one minute, unlimited execution time and restart-on-failure. The task action runs `Update-WSUSComputerOperatingSystems.ps1 -AsService -LogDirectory "..."` from the chosen permanent directory.
 - The installer does not copy itself into the installation directory. Uninstall removes **only the scheduled task**, leaving all files and logs untouched.
 
 To specify a different Task Scheduler folder or SQL settings without extra prompts:
@@ -130,18 +133,35 @@ No triggers are added to SUSDB, and the tool never manually cleans up SqlDepende
 
 ## Logging
 
-The log is stored **next to the main script** as `Update-WSUSComputerOperatingSystems.log`, independently of the Task Scheduler folder. For example, when installed in `C:\Scripts\Update-WSUSComputerOperatingSystems`, the log is `C:\Scripts\Update-WSUSComputerOperatingSystems\Update-WSUSComputerOperatingSystems.log`. The installer prints the actual path after registration.
+The main script writes its regular log to the directory selected with `-LogDirectory`, using the filename `Update-WSUSComputerOperatingSystems.log`. If the parameter is omitted or empty, the main-script directory (`$PSScriptRoot`) is used. The Task Scheduler folder (for example `\MP\`) is unrelated to the log path.
+
+- **New installation:** the installer prompts for the log directory and offers the main-script directory as the default. Enter (or a blank response) selects that directory and prints an explanation.
+- **First upgrade of a legacy task:** if the existing Task Scheduler action has no `-LogDirectory`, the installer prompts **once** and uses the same default. The chosen directory is written into the updated task action.
+- **Normal updates:** the installer reads `-LogDirectory` from the existing task **without asking** and includes the retained path in `Installation summary`.
+- **Explicit override:** pass `-LogDirectory` to the installer to change the stored destination, or pass `-LogDirectory ''` to return to the script directory.
+
+For example, to set or later change the folder by rerunning the installer:
+
+```powershell
+.\Install-WSUSComputerOperatingSystems.ps1 -LogDirectory '\\fileserver\share\WSUS\_Logs'
+```
+
+You can also **change the path in Task Scheduler settings**: open `taskschd.msc` on the WSUS server, browse to `Task Scheduler Library > MP`, open **Update-WSUSComputerOperatingSystems > Properties > Actions > Edit**, and change only the directory inside the action argument `-LogDirectory "..."` (retain the double quotes). Save the task. **Stop and start the task** for the running process to use the new location. Future installer updates will read this value from the task. The installer option is preferable if you want the same validation and the path shown in its summary.
+
+For a network location, use a **UNC path**, not a user-mapped drive such as `M:`. The task runs under `NT AUTHORITY\SYSTEM`; remote SMB access normally uses the domain machine account (for example, `BS\SERVER1$`). Grant this account the necessary share and NTFS permissions. The installer shows a reminder but does not change network permissions.
+
+The main log contains ordinary `INFO`, `WARNING`, and `ERROR` messages **only at the selected destination**. If this differs from the script directory, warnings and errors are also written to a local diagnostic file beside the main script: `Update-WSUSComputerOperatingSystems_errors.log`. If writing to the selected destination fails (such as an unavailable SMB share), the error and the failed entry are written to this local diagnostic file. The listener continues running; later entries are retried at the selected destination, but failed entries are not automatically replayed. If the main log is already local and writing to it fails, the local error file is also used.
 
 Each line uses the local server's time in the format `dd.MM.yyyy HH:mm:ss.fff [LEVEL] Message` with `INFO`, `WARNING`, or `ERROR` levels. Example:
 
 ```text
-24.10.2026 21:57:34.345 [INFO] Catalog loaded: 1094 combinations. Mode=SERVICE.
+24.10.2026 21:57:34.345 [INFO] Catalog loaded: 979 combinations. Mode=SERVICE.
 24.10.2026 21:57:34.678 [ERROR] SQL/listener error: ...; reconnecting in 15 seconds.
 ```
 
-The main script **appends only**: it never rotates, truncates or removes the log. Arrange retention or rotation externally if needed. Persistent connection failures can produce log lines every 15 seconds. Messages include catalog load, actual fixes, SQL errors and reconnects; no-op notifications are not logged. The log is created when the main script runs, not by Install. The script runs as `SYSTEM` under Task Scheduler and needs write access to its directory.
+The main script **appends only**: it never rotates, truncates or removes either log. Arrange retention or rotation externally if needed. Persistent connection failures can produce log lines every 15 seconds. Messages include catalog load, actual fixes, SQL errors and reconnects; no-op notifications are not logged. Logs are created when the main script runs, not by Install.
 
-To follow the log (adjust the path to your installation directory):
+To follow the main log (adjust the path to the directory currently configured in the scheduled task):
 
 ```powershell
 Get-Content 'C:\Scripts\Update-WSUSComputerOperatingSystems\Update-WSUSComputerOperatingSystems.log' -Tail 30 -Wait
@@ -177,7 +197,7 @@ This parses the script and evaluates **only** the built-in catalog definitions a
 ## Additional production checks
 
 - **The main script retains the last tested structured OS catalog and SQL event/update logic; only its logging has changed in this package.** The old draft ZIP contains a different catalog layout; do not replace the script with that older draft.
-- Validate the installer/task **under SYSTEM**, not just from an elevated interactive shell. Check `Update-WSUSComputerOperatingSystems.log` in the main script directory after manual task start.
+- Validate the installer/task **under SYSTEM**, not just from an elevated interactive shell. Check `Update-WSUSComputerOperatingSystems.log` in the configured log directory after manual task start (and `Update-WSUSComputerOperatingSystems_errors.log` beside the script if a write failed).
 - Use only one ongoing `-AsService` task. `Get-ScheduledTask -TaskName 'WSUS*'` helps locate older scheduled tasks, but inspect them before disabling anything.
 - A 60-minute `-AsService` test confirms startup and idle waiting; also verify that an actual client OSDescription overwrite is corrected.
 - Check that the WID Service Broker notification feature remains enabled in SUSDB. The script assumes it, rather than enabling it automatically.

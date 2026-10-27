@@ -16,11 +16,18 @@
     .\Install-WSUSComputerOperatingSystems.ps1 -Uninstall
 .EXAMPLE
     .\Install-WSUSComputerOperatingSystems.ps1 -Uninstall -TaskPath '\MP\'
+.EXAMPLE
+    .\Install-WSUSComputerOperatingSystems.ps1 -LogDirectory '\\server\share\_Logs'
+.NOTES
+    New tasks and existing legacy tasks without -LogDirectory prompt for a log
+    directory. Existing tasks with -LogDirectory reuse it without prompting.
+    Override at any time with -LogDirectory or edit Task Scheduler > Actions.
 #>
 [CmdletBinding()]
 param(
     [Parameter()][string]$InstallPath,
     [Parameter()][string]$TaskPath,
+    [Parameter()][string]$LogDirectory,
     [Parameter()][switch]$Uninstall,
     [Parameter()][string]$SQLServerInstance = '\\.\pipe\MICROSOFT##WID\tsql\query',
     [Parameter()][ValidateSet('Optional','Mandatory','True','False')][string]$Encrypt = 'Optional',
@@ -135,6 +142,9 @@ function Test-ScriptSyntax {
     if ($parameters -notcontains 'AsService') {
         throw 'The selected main script does not support -AsService; refusing to schedule it.'
     }
+    if ($parameters -notcontains 'LogDirectory') {
+        throw 'The selected main script does not support -LogDirectory; refusing to schedule it.'
+    }
 }
 
 function Test-OurScheduledTask {
@@ -176,6 +186,40 @@ function Resolve-TaskPath {
     if ($ForUninstall) { return $null }
     Write-Host 'No existing project task found. Using Task Scheduler root folder.'
     return '\'
+}
+
+function Resolve-LogDirectory {
+    param([string]$RequestedPath, [string]$DefaultDirectory)
+    if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
+        Write-Host "Empty log directory: using script directory ($DefaultDirectory)."
+        return $DefaultDirectory
+    }
+    $path = [Environment]::ExpandEnvironmentVariables($RequestedPath.Trim().Trim('"'))
+    if (-not [IO.Path]::IsPathRooted($path)) {
+        throw 'Log directory must be an absolute path (local drive or UNC share).'
+    }
+    if ($path -match '["`\r\n]') { throw 'Invalid log directory path.' }
+    $path = [IO.Path]::GetFullPath($path)
+    if ($path -match '^[A-Za-z]:\\') {
+        $drive = Get-PSDrive -PSProvider FileSystem -Name $path.Substring(0, 1) -ErrorAction SilentlyContinue
+        if ($drive -and $drive.DisplayRoot -match '^\\\\') {
+            throw 'Mapped drives are unavailable to the SYSTEM task. Use a UNC path instead.'
+        }
+    }
+    return $path
+}
+
+function Get-TaskLogDirectory {
+    param($Task, [string]$DefaultDirectory)
+    $actionArguments = [string](@($Task.Actions)[0].Arguments)
+    # Preserve the configured path. For a legacy task with no -LogDirectory,
+    # return $null so the installer can ask once during migration.
+    $match = [regex]::Match($actionArguments, '(?i)(?:^|\s)-LogDirectory\s+"([^"]*)"')
+    if ($match.Success) { return Resolve-LogDirectory -RequestedPath $match.Groups[1].Value -DefaultDirectory $DefaultDirectory }
+    if ($actionArguments -match '(?i)(?:^|\s)-LogDirectory(?:\s|$)') {
+        throw 'Existing task has an unreadable -LogDirectory argument. Specify -LogDirectory explicitly.'
+    }
+    return $null
 }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -225,6 +269,29 @@ if ($existing -and -not (Test-OurScheduledTask $existing)) {
     throw "Task $TaskPath$TaskName exists but is not recognized as this project's task."
 }
 
+# Ask on a fresh installation or once when upgrading a legacy task without
+# -LogDirectory. Otherwise reuse the setting from Task Scheduler silently.
+if ($PSBoundParameters.ContainsKey('LogDirectory')) {
+    $LogDirectory = Resolve-LogDirectory -RequestedPath $LogDirectory -DefaultDirectory $directory
+} elseif ($existing) {
+    $configuredLogDirectory = Get-TaskLogDirectory -Task $existing -DefaultDirectory $directory
+    if ($null -ne $configuredLogDirectory) {
+        $LogDirectory = $configuredLogDirectory
+        Write-Host "Reusing log directory from existing task: $LogDirectory"
+    } else {
+        Write-Host 'Existing task has no -LogDirectory option (legacy installation).'
+        Write-Host "Choose a log directory once; press Enter to keep the script directory ($directory)."
+        $LogDirectory = Resolve-LogDirectory -RequestedPath (Read-Host "Log directory [$directory]") -DefaultDirectory $directory
+    }
+} else {
+    Write-Host 'New installation: choose a log directory (UNC paths are supported).'
+    $LogDirectory = Resolve-LogDirectory -RequestedPath (Read-Host "Log directory [$directory]") -DefaultDirectory $directory
+}
+if ($LogDirectory.StartsWith('\\')) {
+    Write-Host 'Network log selected: grant share and NTFS write access to the server computer account (e.g. BS\SERVER1$).'
+    Write-Host 'Mapped drive letters (e.g. M:) are not available to the SYSTEM task; use a UNC path.'
+}
+
 # Warn about the same task name in other Scheduler folders; leave them unchanged.
 $elsewhere = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue |
     Where-Object { $_.TaskPath -ne $TaskPath })
@@ -265,6 +332,9 @@ try {
     Write-Host 'Installation summary:'
     Write-Host "  Installation directory: $directory"
     Write-Host "  Main script: $destination"
+    Write-Host "  Log directory: $LogDirectory"
+    Write-Host ('  Log file: ' + (Join-Path $LogDirectory 'Update-WSUSComputerOperatingSystems.log'))
+    Write-Host ('  Local error log: ' + (Join-Path $directory 'Update-WSUSComputerOperatingSystems_errors.log'))
     Write-Host "  Task: $TaskPath$TaskName"
     Write-Host '  Account: SYSTEM'
     Write-Host '  Trigger: System startup + 1 minute'
@@ -318,7 +388,7 @@ try {
 
         Ensure-TaskFolder $TaskPath
         $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -AsService -SQLServerInstance "{1}" -Encrypt {2}' -f $destination, $SQLServerInstance, $Encrypt
+        $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -AsService -SQLServerInstance "{1}" -Encrypt {2} -LogDirectory "{3}"' -f $destination, $SQLServerInstance, $Encrypt, $LogDirectory
         $action = New-ScheduledTaskAction -Execute $powershellExe -Argument $arguments -WorkingDirectory $directory
         $trigger = New-ScheduledTaskTrigger -AtStartup
         $trigger.Delay = 'PT1M'
@@ -356,7 +426,8 @@ try {
     } catch {
         Write-Warning ('Task installed, but failed to start: ' + $_.Exception.Message)
     }
-    Write-Host ('Log file: ' + (Join-Path $directory 'Update-WSUSComputerOperatingSystems.log'))
+    Write-Host ('Log file: ' + (Join-Path $LogDirectory 'Update-WSUSComputerOperatingSystems.log'))
+    Write-Host ('Local error log (created on errors): ' + (Join-Path $directory 'Update-WSUSComputerOperatingSystems_errors.log'))
 } finally {
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
