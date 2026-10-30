@@ -1,49 +1,29 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Install, update or uninstall the WSUS OS descriptions event task.
+    Install or update the WSUS OS description monitor without script parameters.
 .DESCRIPTION
-    Downloads a ZIP of the fork, compares files by SHA-256, and installs or
-    updates changed files only. Files or directories starting with a dot are
-    ignored. Registers an event-driven SYSTEM task in Task Scheduler.
-    Files are staged as .new before replacement; no old-version backups.
+    Downloads the fixed repository ZIP, compares SHA-256 hashes, stages .new
+    files and replaces only changed files. Dot-prefixed files and directories
+    are excluded. Existing WSUS scheduled-task settings and installation path
+    are reused automatically. Interactive configuration is performed only
+    when no project task exists.
 .EXAMPLE
-    .\Install-WSUSComputerOperatingSystems.ps1
-.EXAMPLE
-    .\Install-WSUSComputerOperatingSystems.ps1 -InstallPath 'D:\Scripts\WSUS'
-.EXAMPLE
-    .\Install-WSUSComputerOperatingSystems.ps1 -InstallPath 'D:\Scripts\WSUS' -TaskPath '\MP\'
-.EXAMPLE
-    .\Install-WSUSComputerOperatingSystems.ps1 -Uninstall
-.EXAMPLE
-    .\Install-WSUSComputerOperatingSystems.ps1 -Uninstall -TaskPath '\MP\'
-.EXAMPLE
-    .\Install-WSUSComputerOperatingSystems.ps1 -LogDirectory '\\server\share\_Logs'
-.EXAMPLE
-    .\Install-WSUSComputerOperatingSystems.ps1 -SkipFileUpdate -LogDirectory 'C:\WSUSLogs'
+    .\Update.ps1
 .NOTES
-    New tasks and existing legacy tasks without -LogDirectory prompt for a log
-    directory. Existing tasks with -LogDirectory reuse it without prompting.
-    Override at any time with -LogDirectory or edit Task Scheduler > Actions.
+    Requires elevated Windows PowerShell 5.1 on the WSUS server.
+    To change an existing task's SQL settings, log directory or task folder,
+    edit or move it in Windows Task Scheduler; routine updates preserve it.
 #>
-[CmdletBinding()]
-param(
-    [Parameter()][string]$InstallPath,
-    [Parameter()][string]$TaskPath,
-    [Parameter()][string]$LogDirectory,
-    [Parameter()][switch]$Uninstall,
-    [Parameter()][string]$SQLServerInstance = '\\.\pipe\MICROSOFT##WID\tsql\query',
-    [Parameter()][ValidateSet('Optional','Mandatory','True','False')][string]$Encrypt = 'Optional',
-    [Parameter()][string]$MainScriptUrl,
-    [Parameter()][string]$RepositoryZipUrl = 'https://github.com/avmaksimov/Update-WSUSComputerOperatingSystems/archive/refs/heads/main.zip',
-    [Parameter()][switch]$SkipFileUpdate
-)
 
 $ErrorActionPreference = 'Stop'
+$owner = 'avmaksimov'
+$repository = 'Update-WSUSComputerOperatingSystems'
+$branch = 'main'
 $MainScriptName = 'Update-WSUSComputerOperatingSystems.ps1'
 $TaskName = 'Update-WSUSComputerOperatingSystems'
-# Default source is the full repository ZIP from the fork's main branch.
-# -MainScriptUrl remains supported for legacy single-file overrides.
+$RepositoryZipUrl = "https://github.com/$owner/$repository/archive/refs/heads/$branch.zip"
+$DefaultSqlServer = '\\.\pipe\MICROSOFT##WID\tsql\query'
 
 function Read-YesNo {
     param([string]$Question, [bool]$DefaultYes = $false)
@@ -77,41 +57,6 @@ function Test-TemporaryDirectory {
     }
     # Also catch conventional custom temporary directories (e.g. C:\Temp, D:\Work\tmp).
     return ($full -match '(?i)[\\/](temp|tmp)([\\/]|$)')
-}
-
-function Get-InstallationDirectory {
-    param([string]$ExplicitPath)
-    # Resolve the default installation directory from this installer, not the caller's $PWD.
-    $installerDirectory = $PSScriptRoot
-    $mainNextToInstaller = Join-Path $installerDirectory $MainScriptName
-    if (-not $PSBoundParameters.ContainsKey('ExplicitPath')) { $ExplicitPath = '' }
-    $needPrompt = [string]::IsNullOrWhiteSpace($ExplicitPath) -and
-        (-not (Test-Path -LiteralPath $mainNextToInstaller -PathType Leaf) -or (Test-TemporaryDirectory $installerDirectory))
-    if (-not $needPrompt) {
-        $chosen = if ($ExplicitPath) { Get-FullInstallPath $ExplicitPath } else { Get-FullInstallPath $installerDirectory }
-        if (-not (Test-TemporaryDirectory $chosen)) { return $chosen }
-        Write-Warning "Temporary directories cannot be used as permanent install locations: $chosen"
-    }
-    $default = if (Test-TemporaryDirectory $installerDirectory) { $null } else { $installerDirectory }
-    while ($true) {
-        if ($default) {
-            $answer = Read-Host "Installation directory [$default]"
-            if ([string]::IsNullOrWhiteSpace($answer)) { $answer = $default }
-        } else {
-            $answer = Read-Host 'Installation directory (required; temporary folders are not allowed)'
-            if ([string]::IsNullOrWhiteSpace($answer)) {
-                Write-Warning 'Please specify a permanent installation directory.'
-                continue
-            }
-        }
-        try { $chosen = Get-FullInstallPath $answer }
-        catch { Write-Warning $_.Exception.Message; continue }
-        if (Test-TemporaryDirectory $chosen) {
-            Write-Warning 'That directory is temporary. Please choose another location.'
-            continue
-        }
-        return $chosen
-    }
 }
 
 function Normalize-TaskPath {
@@ -160,38 +105,6 @@ function Test-OurScheduledTask {
         ($actions[0].Arguments -match '(?i)Update-WSUSComputerOperatingSystems(-Event)?\.ps1'))
 }
 
-function Resolve-TaskPath {
-    param(
-        [string]$RequestedPath,
-        [bool]$TaskPathSpecified,
-        [bool]$ForUninstall = $false
-    )
-
-    if ($TaskPathSpecified) { return Normalize-TaskPath $RequestedPath }
-
-    # Search all Task Scheduler folders; never select an ambiguous or unrelated task.
-    $tasks = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
-    $projectTasks = @($tasks | Where-Object { Test-OurScheduledTask $_ })
-
-    if ($projectTasks.Count -gt 1) {
-        $paths = ($projectTasks | ForEach-Object { $_.TaskPath + $_.TaskName }) -join ', '
-        throw "Multiple project tasks found: $paths. Specify -TaskPath explicitly."
-    }
-    if ($projectTasks.Count -eq 1) {
-        $foundPath = Normalize-TaskPath $projectTasks[0].TaskPath
-        Write-Host "Found existing project task: $foundPath$TaskName"
-        return $foundPath
-    }
-    if ($tasks.Count -gt 0) {
-        $paths = ($tasks | ForEach-Object { $_.TaskPath + $_.TaskName }) -join ', '
-        throw "Task name '$TaskName' is already used by unrelated task(s): $paths. Specify -TaskPath explicitly."
-    }
-
-    if ($ForUninstall) { return $null }
-    Write-Host 'No existing project task found. Using Task Scheduler root folder.'
-    return '\'
-}
-
 function Resolve-LogDirectory {
     param([string]$RequestedPath, [string]$DefaultDirectory)
     if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
@@ -213,193 +126,207 @@ function Resolve-LogDirectory {
     return $path
 }
 
-function Get-TaskLogDirectory {
-    param($Task, [string]$DefaultDirectory)
-    $actionArguments = [string](@($Task.Actions)[0].Arguments)
-    # Preserve the configured path. For a legacy task with no -LogDirectory,
-    # return $null so the installer can ask once during migration.
-    $match = [regex]::Match($actionArguments, '(?i)(?:^|\s)-LogDirectory\s+"([^"]*)"')
-    if ($match.Success) { return Resolve-LogDirectory -RequestedPath $match.Groups[1].Value -DefaultDirectory $DefaultDirectory }
-    if ($actionArguments -match '(?i)(?:^|\s)-LogDirectory(?:\s|$)') {
-        throw 'Existing task has an unreadable -LogDirectory argument. Specify -LogDirectory explicitly.'
+function Get-TaskMainScriptPath {
+    param($Task)
+    $args = [string](@($Task.Actions)[0].Arguments)
+    $match = [regex]::Match($args, '(?i)(?:^|\s)-File\s+"([^"]+)"')
+    if (-not $match.Success) {
+        throw "The existing task's -File argument is not a quoted path. Review it manually in Task Scheduler."
     }
-    return $null
+    $path = [Environment]::ExpandEnvironmentVariables($match.Groups[1].Value)
+    if (-not [IO.Path]::IsPathRooted($path) -or $path -match '^[\\]{2}') {
+        throw "The task's main script path must be a local absolute path: $path"
+    }
+    $path = [IO.Path]::GetFullPath($path)
+    if (-not [IO.Path]::GetFileName($path).Equals($MainScriptName, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unexpected main script name in Task Scheduler: $path"
+    }
+    return $path
 }
 
-# Scheduled-task uninstall does not download files or delete installed files.
+function Get-TaskLogDirectory {
+    param($Task,[string]$DefaultDirectory)
+    $args = [string](@($Task.Actions)[0].Arguments)
+    $match = [regex]::Match($args, '(?i)(?:^|\s)-LogDirectory\s+"([^"]*)"')
+    if ($match.Success) {
+        return Resolve-LogDirectory -RequestedPath $match.Groups[1].Value -DefaultDirectory $DefaultDirectory
+    }
+    # A legacy task with no parameter logs locally. Never change it silently.
+    if ($args -match '(?i)(?:^|\s)-LogDirectory(?:\s|$)') {
+        throw 'The existing task contains an unreadable -LogDirectory option; inspect it in Task Scheduler.'
+    }
+    return $DefaultDirectory
+}
+
+# Only an administrator can modify SYSTEM tasks and machine-wide scripts.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Run the installer from an elevated Windows PowerShell 5.1 session.'
+    throw 'Run Update.ps1 from an elevated Windows PowerShell 5.1 session.'
 }
-if ($SQLServerInstance -match '["\r\n]' -or $Encrypt -match '["\r\n]') { throw 'Invalid SQL connection parameter.' }
 
-if ($Uninstall) {
-    $TaskPath = Resolve-TaskPath -RequestedPath $TaskPath -TaskPathSpecified ($PSBoundParameters.ContainsKey('TaskPath')) -ForUninstall $true
-    if ($null -eq $TaskPath) { Write-Host "Task not found: $TaskName"; return }
-    $existing = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
-    if (-not $existing) { Write-Host "Task not found: $TaskPath$TaskName"; return }
-    if (-not (Test-OurScheduledTask $existing)) {
-        throw "Task $TaskPath$TaskName does not appear to belong to this project. Refusing to remove it."
+# Locate the existing project task in any Scheduler folder; an update uses its
+# current -File location even if Update.ps1 was downloaded into %TEMP%.
+$allTasks = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+$projectTasks = @($allTasks | Where-Object { Test-OurScheduledTask $_ })
+if ($projectTasks.Count -gt 1) {
+    $list = ($projectTasks | ForEach-Object { $_.TaskPath + $_.TaskName }) -join ', '
+    throw "Multiple project tasks found: $list. Resolve the ambiguity in Task Scheduler before updating."
+}
+if ($projectTasks.Count -eq 0 -and $allTasks.Count -gt 0) {
+    $list = ($allTasks | ForEach-Object { $_.TaskPath + $_.TaskName }) -join ', '
+    throw "Unrelated task(s) already use the name '$TaskName': $list. Nothing was modified."
+}
+
+$existing = if ($projectTasks.Count -eq 1) { $projectTasks[0] } else { $null }
+$firstInstall = ($null -eq $existing)
+if ($firstInstall) {
+    Write-Host 'No existing WSUS OS monitor task found. First-time setup:' -ForegroundColor Cyan
+    $defaultDirectory = (Get-Location).ProviderPath
+    if (Test-TemporaryDirectory $defaultDirectory) {
+        # Do not propose a TEMP directory as a permanent installation location.
+        $defaultDirectory = $null
     }
-    if (Read-YesNo "Remove task $TaskPath$TaskName?" -DefaultYes $false) {
-        Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -Confirm:$false
-        Write-Host 'Task removed. Installed files and logs were left untouched.'
-    } else { Write-Host 'Cancelled.' }
-    return
-}
-
-if ($SkipFileUpdate -and $PSBoundParameters.ContainsKey('MainScriptUrl')) {
-    throw '-SkipFileUpdate cannot be combined with -MainScriptUrl.'
-}
-
-$directory = Get-InstallationDirectory -ExplicitPath $InstallPath
-$destination = Join-Path $directory $MainScriptName
-$TaskPath = Resolve-TaskPath -RequestedPath $TaskPath -TaskPathSpecified ($PSBoundParameters.ContainsKey('TaskPath'))
-$existing = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($existing -and -not (Test-OurScheduledTask $existing)) {
-    throw "Task $TaskPath$TaskName exists but is not recognized as this project's task."
-}
-
-# Preserve existing log configuration; ask only on first install or for a legacy task.
-if ($PSBoundParameters.ContainsKey('LogDirectory')) {
-    $LogDirectory = Resolve-LogDirectory -RequestedPath $LogDirectory -DefaultDirectory $directory
-} elseif ($existing) {
-    $configuredLogDirectory = Get-TaskLogDirectory -Task $existing -DefaultDirectory $directory
-    if ($null -ne $configuredLogDirectory) {
-        $LogDirectory = $configuredLogDirectory
-        Write-Host "Reusing log directory from existing task: $LogDirectory"
-    } else {
-        Write-Host 'Existing task has no -LogDirectory option (legacy installation).'
-        $LogDirectory = Resolve-LogDirectory -RequestedPath (Read-Host "Log directory [$directory]") -DefaultDirectory $directory
+    while ($true) {
+        $answer = if ($defaultDirectory) {
+            Read-Host "Installation directory [$defaultDirectory]"
+        } else { Read-Host 'Permanent installation directory (required)' }
+        if ([string]::IsNullOrWhiteSpace($answer)) { $answer = $defaultDirectory }
+        if ([string]::IsNullOrWhiteSpace($answer)) { continue }
+        try { $directory = Get-FullInstallPath $answer } catch { Write-Warning $_.Exception.Message; continue }
+        if (Test-TemporaryDirectory $directory) { Write-Warning 'Temporary folders are not supported.'; continue }
+        if (-not [IO.Path]::IsPathRooted($directory) -or $directory -match '^\\') {
+            Write-Warning 'The installation directory must be a local absolute path.'; continue
+        }
+        break
     }
+    while ($true) {
+        $folder = Read-Host 'Task Scheduler folder [\] (example: \MP\)'
+        try { $TaskPath = Normalize-TaskPath $folder; break }
+        catch { Write-Warning $_.Exception.Message }
+    }
+    $logAnswer = Read-Host "Log directory [$directory] (UNC supported)"
+    $LogDirectory = Resolve-LogDirectory -RequestedPath $logAnswer -DefaultDirectory $directory
+    $sqlAnswer = Read-Host "SQL Server instance [$DefaultSqlServer]"
+    $SQLServerInstance = if ([string]::IsNullOrWhiteSpace($sqlAnswer)) { $DefaultSqlServer } else { $sqlAnswer.Trim() }
+    if ($SQLServerInstance -match '["\r\n]') { throw 'Invalid SQL instance name.' }
+    $Encrypt = 'Optional'
+    $destination = Join-Path $directory $MainScriptName
 } else {
-    Write-Host 'New installation: choose a log directory (UNC paths are supported).'
-    $LogDirectory = Resolve-LogDirectory -RequestedPath (Read-Host "Log directory [$directory]") -DefaultDirectory $directory
+    $TaskPath = Normalize-TaskPath $existing.TaskPath
+    $destination = Get-TaskMainScriptPath $existing
+    $directory = Split-Path -Parent $destination
+    if (Test-TemporaryDirectory $directory) { throw "Existing task points into a temporary folder: $directory" }
+    $LogDirectory = Get-TaskLogDirectory -Task $existing -DefaultDirectory $directory
+    Write-Host "Existing task: $TaskPath$TaskName" -ForegroundColor Cyan
+    Write-Host "Installed directory: $directory"
+    Write-Host "Log directory: $LogDirectory"
+    Write-Host 'Task configuration will be preserved; no setup questions are needed.'
 }
 if ($LogDirectory.StartsWith('\\')) {
-    Write-Host 'Network log selected: grant share and NTFS write access to the server computer account (e.g. BS\SERVER1$).'
-    Write-Host 'Mapped drive letters (e.g. M:) are not available to the SYSTEM task; use a UNC path.'
+    Write-Host 'Network log: SYSTEM requires share and NTFS write permissions for the server computer account.'
 }
 
-# Detect multiple same-name tasks in other folders but never change them.
-$elsewhere = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue |
-    Where-Object { $_.TaskPath -ne $TaskPath })
-foreach ($item in $elsewhere) {
-    Write-Warning "A task with the same name also exists at $($item.TaskPath). It will not be modified."
-}
-
-$work = Join-Path $env:TEMP ('WSUS-OS-Install-' + [guid]::NewGuid().ToString('N'))
+$work = Join-Path $env:TEMP ('WSUS-OS-Update-' + [guid]::NewGuid().ToString('N'))
 $zip = Join-Path $work 'source.zip'
 $extract = Join-Path $work 'unpacked'
 $stagedFiles = New-Object 'System.Collections.Generic.List[string]'
 $replacedCount = 0
 $taskRegistered = $false
 $wasRunning = $false
+$stoppedForUpdate = $false
 
 try {
     $entries = New-Object 'System.Collections.Generic.List[object]'
     $changes = New-Object 'System.Collections.Generic.List[object]'
     New-Item -ItemType Directory -Path $work -Force -ErrorAction Stop | Out-Null
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $downloadUrl = $RepositoryZipUrl + '?cacheBust=' + [guid]::NewGuid().ToString('N')
+    $headers = @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' }
+    Write-Host "Source: $RepositoryZipUrl"
+    Write-Host "Downloading repository ZIP with Invoke-WebRequest..."
+    Invoke-WebRequest -Uri $downloadUrl -Headers $headers -OutFile $zip -UseBasicParsing -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'Downloaded ZIP not found.' }
+    Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force -ErrorAction Stop
+    $roots = @(Get-ChildItem -LiteralPath $extract -Directory -ErrorAction Stop)
+    if ($roots.Count -ne 1) { throw 'Unexpected repository ZIP structure: expected exactly one root directory.' }
+    $sourceRoot = $roots[0].FullName.TrimEnd('\')
 
-    if ($SkipFileUpdate) {
-        Write-Host 'File download and replacement skipped (-SkipFileUpdate).'
-        if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
-            throw "Main script not found: $destination. Cannot use -SkipFileUpdate."
-        }
-        Test-ScriptSyntax $destination
-    } else {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $sources = @()
-        if ($PSBoundParameters.ContainsKey('MainScriptUrl')) {
-            # Backwards-compatible override: fetch ONLY the main script, not the ZIP.
-            if ($MainScriptUrl -notmatch '^https://') { throw '-MainScriptUrl must use HTTPS.' }
-            $sourceFile = Join-Path $work $MainScriptName
-            Write-Host "Downloading main script: $MainScriptUrl"
-            Invoke-WebRequest -Uri $MainScriptUrl -OutFile $sourceFile -UseBasicParsing -ErrorAction Stop
-            $sources = @([pscustomobject]@{ Name = $MainScriptName; Source = $sourceFile })
-        } else {
-            if ($RepositoryZipUrl -notmatch '^https://') { throw '-RepositoryZipUrl must use HTTPS.' }
-            $urlSeparator = if ($RepositoryZipUrl.Contains('?')) { '&' } else { '?' }
-            $downloadUrl = $RepositoryZipUrl + $urlSeparator + 'cacheBust=' + [guid]::NewGuid().ToString('N')
-            $headers = @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' }
-            Write-Host "Downloading repository ZIP: $RepositoryZipUrl"
-            Invoke-WebRequest -Uri $downloadUrl -Headers $headers -OutFile $zip -UseBasicParsing -ErrorAction Stop
-            if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'Downloaded ZIP not found.' }
-            Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force -ErrorAction Stop
-            $roots = @(Get-ChildItem -LiteralPath $extract -Directory -ErrorAction Stop)
-            if ($roots.Count -ne 1) { throw 'Unexpected repository ZIP structure: expected exactly one root directory.' }
-            $sourceRoot = $roots[0].FullName.TrimEnd('\')
-
-            # ZIP is unpacked into TEMP. Dot-prefixed entries may exist there, but
-            # are never copied into the permanent installation directory.
-            $sourceFiles = @(
-                Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force -ErrorAction Stop |
-                    Where-Object {
-                        $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\')
-                        $relative -notmatch '(?:^|[\\/])\.'
-                    } |
-                    Sort-Object { $_.FullName.Substring($sourceRoot.Length).TrimStart('\') }
-            )
-            if ($sourceFiles.Count -eq 0) { throw 'No installable files found in repository ZIP.' }
-            $sources = @($sourceFiles | ForEach-Object {
-                if (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw "Unsupported reparse point in ZIP: $($_.FullName)"
-                }
+    # ZIP is unpacked into TEMP. Dot-prefixed entries may exist there, but
+    # are never copied into the permanent installation directory.
+    $sourceFiles = @(
+        Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force -ErrorAction Stop |
+            Where-Object {
                 $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\')
-                [pscustomobject]@{ Name = $relative; Source = $_.FullName }
-            })
-            if (@($sources | Where-Object { $_.Name -ieq $MainScriptName }).Count -ne 1) {
-                throw "Main script $MainScriptName not found at repository root."
-            }
+                $relative -notmatch '(?:^|[\\/])\.'
+            } |
+            Sort-Object { $_.FullName.Substring($sourceRoot.Length).TrimStart('\') }
+    )
+    if ($sourceFiles.Count -eq 0) { throw 'No installable files found in repository ZIP.' }
+    $sources = @($sourceFiles | ForEach-Object {
+        if (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Unsupported reparse point in ZIP: $($_.FullName)"
         }
-
-        $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-        foreach ($source in $sources) {
-            if (-not $seen.Add($source.Name)) { throw "Duplicate file path in repository: $($source.Name)" }
-            $to = Join-Path $directory $source.Name
-            if (Test-Path -LiteralPath $to -PathType Container) { throw "Destination is a directory: $to" }
-            $newHash = (Get-FileHash -LiteralPath $source.Source -Algorithm SHA256 -ErrorAction Stop).Hash
-            $state = if (-not (Test-Path -LiteralPath $to -PathType Leaf)) {
-                'INSTALL'
-            } elseif ((Get-FileHash -LiteralPath $to -Algorithm SHA256 -ErrorAction Stop).Hash -ine $newHash) {
-                'REPLACE'
-            } else {
-                'UNCHANGED'
-            }
-            $entry = [pscustomobject]@{
-                Name=$source.Name; Source=$source.Source; Target=$to; Hash=$newHash; State=$state
-            }
-            [void]$entries.Add($entry)
-            if ($state -ne 'UNCHANGED') { [void]$changes.Add($entry) }
-        }
-        $main = @($entries | Where-Object { $_.Name -ieq $MainScriptName })[0]
-        Test-ScriptSyntax $main.Source
-        if ($main.State -eq 'UNCHANGED') { Test-ScriptSyntax $destination }
+        $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\')
+        [pscustomobject]@{ Name = $relative; Source = $_.FullName }
+    })
+    if (@($sources | Where-Object { $_.Name -ieq $MainScriptName }).Count -ne 1) {
+        throw "Main script $MainScriptName not found at repository root."
     }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($source in $sources) {
+        if (-not $seen.Add($source.Name)) { throw "Duplicate file path in repository: $($source.Name)" }
+        $to = Join-Path $directory $source.Name
+        if (Test-Path -LiteralPath $to -PathType Container) { throw "Destination is a directory: $to" }
+        $newHash = (Get-FileHash -LiteralPath $source.Source -Algorithm SHA256 -ErrorAction Stop).Hash
+        $state = if (-not (Test-Path -LiteralPath $to -PathType Leaf)) {
+            'INSTALL'
+        } elseif ((Get-FileHash -LiteralPath $to -Algorithm SHA256 -ErrorAction Stop).Hash -ine $newHash) {
+            'REPLACE'
+        } else {
+            'UNCHANGED'
+        }
+        $entry = [pscustomobject]@{
+            Name=$source.Name; Source=$source.Source; Target=$to; Hash=$newHash; State=$state
+        }
+        [void]$entries.Add($entry)
+        if ($state -ne 'UNCHANGED') { [void]$changes.Add($entry) }
+    }
+    $main = @($entries | Where-Object { $_.Name -ieq $MainScriptName })[0]
+    Test-ScriptSyntax $main.Source
+    if ($main.State -eq 'UNCHANGED') { Test-ScriptSyntax $destination }
 
-    # Show every file and a single task+file confirmation, without separate download prompts.
+    # The updater must exist in the chosen repository version. This protects
+    # against unintentionally running against a pre-rename or wrong ZIP.
+    if (@($entries | Where-Object { $_.Name -ieq 'Update.ps1' }).Count -ne 1) {
+        throw 'Repository ZIP does not contain Update.ps1. Publish the rename to main before running this updater.'
+    }
+    $changedMain = @($changes | Where-Object { $_.Name -ieq $MainScriptName }).Count -gt 0
+
     $installCount = @($changes | Where-Object { $_.State -eq 'INSTALL' }).Count
     $replaceCount = @($changes | Where-Object { $_.State -eq 'REPLACE' }).Count
     $sameCount = @($entries | Where-Object { $_.State -eq 'UNCHANGED' }).Count
     Write-Host ''
     Write-Host '=== INSTALL / UPDATE SUMMARY ===' -ForegroundColor Cyan
-    Write-Host "Installation directory: $directory"
-    Write-Host "Source: $(if ($SkipFileUpdate) { 'Local files (no download)' } elseif ($PSBoundParameters.ContainsKey('MainScriptUrl')) { $MainScriptUrl } else { $RepositoryZipUrl })"
-    Write-Host ("Files: {0} to install, {1} to replace, {2} unchanged (skipped)." -f $installCount, $replaceCount, $sameCount)
-    foreach ($entry in $entries) {
-        $color = switch ($entry.State) { 'INSTALL' { 'Green' }; 'REPLACE' { 'Yellow' }; default { 'DarkGray' } }
-        Write-Host ('  {0,-10} {1}' -f $entry.State, $entry.Name) -ForegroundColor $color
+    Write-Host "Source: $RepositoryZipUrl"
+    Write-Host "Destination: $directory"
+    Write-Host "Task: $TaskPath$TaskName $(if ($firstInstall) { '(new)' } else { '(existing; settings retained)' })"
+    Write-Host "Logs: $LogDirectory"
+    Write-Host ('Changes: {0} install, {1} replace, {2} unchanged.' -f $installCount, $replaceCount, $sameCount)
+    foreach ($item in $entries) {
+        $color = switch ($item.State) { 'INSTALL' { 'Green' }; 'REPLACE' { 'Yellow' }; default { 'DarkGray' } }
+        Write-Host ('  {0,-10} {1}' -f $item.State, $item.Name) -ForegroundColor $color
     }
-    Write-Host "Task: $TaskPath$TaskName $(if ($existing) { '(update)' } else { '(new)' })"
-    Write-Host 'Account: SYSTEM; trigger: startup + 1 minute; mode: -AsService'
-    Write-Host "Log directory: $LogDirectory"
-    Write-Host ('Log file: ' + (Join-Path $LogDirectory 'Update-WSUSComputerOperatingSystems.log'))
-    Write-Host ('Local error log: ' + (Join-Path $directory 'Update-WSUSComputerOperatingSystems_errors.log'))
-    Write-Host 'Dot-prefixed files/folders are not copied; other local files are retained.'
-    Write-Host 'No old-version backups are created. Changed files are staged as .new before replacement.'
-    if (-not (Read-YesNo 'Apply file changes and register/update the scheduled task?' -DefaultYes $false)) {
-        Write-Host 'Cancelled. No files or tasks were changed.'
+    Write-Host 'Dot-prefixed paths are excluded; unrelated local files are retained.'
+    Write-Host 'Files are staged as .new before replacement. No backups or log files from updater.'
+
+    if ($changes.Count -eq 0 -and -not $firstInstall) {
+        Write-Host 'Everything is up to date. Existing task was left unchanged.' -ForegroundColor Green
+        return
+    }
+    Write-Host ''
+    if (-not (Read-YesNo 'Apply these changes?' -DefaultYes $false)) {
+        Write-Host 'Cancelled. No files or scheduled tasks were changed.'
         return
     }
 
@@ -419,20 +346,23 @@ try {
         }
     }
 
+    # An existing task is never re-registered or reconfigured on an update.
+    # Stop/restart it only if the *running main script* needs replacing.
     $wasRunning = ($null -ne $existing -and $existing.State -eq 'Running')
-    if ($wasRunning) {
-        Write-Host 'Stopping the existing WSUS OS monitor task...'
+    if ($wasRunning -and $changedMain) {
+        Write-Host 'Stopping the running WSUS OS monitor to update its main script...'
         Stop-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction Stop
+        $stoppedForUpdate = $true
         $until = (Get-Date).AddSeconds(30)
         do {
             Start-Sleep -Milliseconds 500
             $state = (Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName).State
         } while ($state -eq 'Running' -and (Get-Date) -lt $until)
-        if ($state -eq 'Running') { throw 'The previous task instance did not stop. No installed files were replaced.' }
+        if ($state -eq 'Running') { throw 'Existing task did not stop; no installed files were replaced.' }
     }
 
-    # A full multi-file update is NOT transactional, but every individual
-    # replacement is atomic on the same volume. No backup files are created.
+    # Each replacement is atomic on the same volume. Multi-file updates are
+    # not atomic as a group, and cannot be rolled back without backups.
     foreach ($item in $changes) {
         $newFile = $item.Target + '.new'
         if ($item.State -eq 'REPLACE') {
@@ -444,39 +374,45 @@ try {
         Write-Host ("{0}: {1}" -f $(if ($item.State -eq 'INSTALL') { 'Installed' } else { 'Replaced' }), $item.Name) -ForegroundColor Green
     }
 
-    Ensure-TaskFolder $TaskPath
-    $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -AsService -SQLServerInstance "{1}" -Encrypt {2} -LogDirectory "{3}"' -f $destination, $SQLServerInstance, $Encrypt, $LogDirectory
-    $action = New-ScheduledTaskAction -Execute $powershellExe -Argument $arguments -WorkingDirectory $directory
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    $trigger.Delay = 'PT1M'
-    $runAs = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
-        -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    $task = New-ScheduledTask -Action $action -Trigger $trigger -Principal $runAs -Settings $settings
-    Register-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -InputObject $task -Force -ErrorAction Stop | Out-Null
-    $taskRegistered = $true
+    if ($firstInstall) {
+        Ensure-TaskFolder $TaskPath
+        $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -AsService -SQLServerInstance "{1}" -Encrypt {2} -LogDirectory "{3}"' -f $destination, $SQLServerInstance, $Encrypt, $LogDirectory
+        $action = New-ScheduledTaskAction -Execute $powershellExe -Argument $arguments -WorkingDirectory $directory
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $trigger.Delay = 'PT1M'
+        $runAs = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
+            -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        $task = New-ScheduledTask -Action $action -Trigger $trigger -Principal $runAs -Settings $settings
+        Register-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -InputObject $task -ErrorAction Stop | Out-Null
+        $taskRegistered = $true
 
-    Write-Host ''
-    Write-Host "Installed task: $TaskPath$TaskName"
-    Write-Host 'Task runs as SYSTEM on startup with a 1-minute delay and no time limit.'
-    try {
-        Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction Stop
-        Write-Host 'Task start requested. Check the log for SQL access and write permissions under SYSTEM.'
-    } catch {
-        Write-Warning ('Task installed, but failed to start: ' + $_.Exception.Message)
-    }
-    Write-Host ('Log file: ' + (Join-Path $LogDirectory 'Update-WSUSComputerOperatingSystems.log'))
-} catch {
-    if ($replacedCount -gt 0 -and -not $taskRegistered) {
-        Write-Warning ("{0} file(s) were changed before an installation error. No automatic rollback (no backups)." -f $replacedCount)
-    }
-    if ($wasRunning -and -not $taskRegistered) {
+        Write-Host "Installed task: $TaskPath$TaskName"
         try {
             Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction Stop
+            Write-Host 'Task start requested. Check logs and SQL access under SYSTEM.'
+        } catch { Write-Warning ('Task installed, but failed to start: ' + $_.Exception.Message) }
+    } else {
+        Write-Host 'Existing Task Scheduler configuration preserved.'
+        if ($stoppedForUpdate) {
+            Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction Stop
+            $stoppedForUpdate = $false
+            Write-Host 'Existing monitor task restarted.'
+        }
+    }
+    Write-Host 'Update completed.' -ForegroundColor Green
+} catch {
+    if ($replacedCount -gt 0) {
+        Write-Warning "$replacedCount file(s) were changed before the error; no automatic rollback is available."
+    }
+    if ($stoppedForUpdate) {
+        try {
+            Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction Stop
+            Write-Host 'Previously running task restarted after error.'
         } catch {
-            Write-Warning 'Could not restart the previously running task after an installation error.'
+            Write-Warning ('Could not restart the previously running task: ' + $_.Exception.Message)
         }
     }
     throw
