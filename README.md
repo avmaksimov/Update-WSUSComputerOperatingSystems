@@ -43,13 +43,13 @@ By default, `-SQLServerInstance` is the local WID named pipe `\\.\pipe\MICROSOFT
 
 ## Installation (scheduled task)
 
-Run the installer **on the WSUS server**, from an elevated **Windows PowerShell 5.1** session. The resulting task runs the main script **in the installation directory**; there is no copy into `Program Files`. When `-InstallPath` is omitted, the installer looks for the main PS1 **next to its own file** (`$PSScriptRoot`), not in the caller's PowerShell working directory (`$PWD`). The installer is the only setup file you need. When the main script is missing it downloads it; when already present it asks `Download the latest version? [Y/n]` (default **Yes**).
+Run the installer **on the WSUS server**, from an elevated **Windows PowerShell 5.1** session. The resulting task runs the main script **in the installation directory**; there is no copy into `Program Files`. When `-InstallPath` is omitted, the installer looks for the main PS1 **next to its own file** (`$PSScriptRoot`), not in the caller's PowerShell working directory (`$PWD`). The installer is the only setup file you need. By default, the installer downloads a ZIP of the fork's `main` branch, compares files using SHA-256, and displays one combined confirmation. Files and directories with dot-prefixed names (such as `.gitignore` and `.github`) are not copied to the permanent installation directory.
 
-> **GitHub source:** The installer and quick-install commands download from [`avmaksimov/Update-WSUSComputerOperatingSystems`](https://github.com/avmaksimov/Update-WSUSComputerOperatingSystems), branch `main`. **Verify that this branch contains the updated installer and main script before using the download commands.** Local modifications are not automatically published to GitHub. To test your edited local main script, answer **No** to `Download the latest version?`, or provide an alternative trusted URL with `-MainScriptUrl`. Do not switch download URLs to the original Borgquite repository unless it contains the required event-driven changes.
+> **GitHub source:** The installer and quick-install commands download from [`avmaksimov/Update-WSUSComputerOperatingSystems`](https://github.com/avmaksimov/Update-WSUSComputerOperatingSystems), branch `main`. **Verify that this branch contains the updated installer and main script before using the download commands.** Local modifications are not automatically published to GitHub. To keep local scripts unchanged, use `-SkipFileUpdate`. The legacy `-MainScriptUrl` option still downloads only the main PS1, while `-RepositoryZipUrl` selects an alternative repository ZIP. Do not switch download URLs to the original Borgquite repository unless it contains the required event-driven changes.
 
 ### Quick installation (download and run Install)
 
-These one-liners download **only the installer** into a uniquely named file in `%TEMP%`, execute it, and delete the temporary copy. The installer then downloads/updates the main script into the chosen *permanent* location and registers the scheduled task. The commands do not overwrite an existing main script without the update prompt. Review the downloaded installer before running code obtained from the internet.
+These one-liners download **only the installer** into a uniquely named file in `%TEMP%`, execute it, and delete the temporary copy. The installer downloads the repository ZIP, compares SHA-256 checksums, shows added and changed files, asks for one confirmation, and registers the scheduled task. No installed files are replaced before confirmation. Review the downloaded installer before running code obtained from the internet.
 
 **A. Install in the current directory.** First navigate to the desired permanent folder (`Set-Location` or `cd`), then run. The one-liner explicitly passes that folder via `-InstallPath`, because the downloaded installer itself lives in `%TEMP%`:
 
@@ -88,18 +88,18 @@ If the main script already exists **next to the installer**, the installation-di
 
 ### Installer prompts and task configuration
 
-- If no main PS1 exists in the target directory, download it automatically. Otherwise offer to download the latest version, **Yes** by default; answering **No** keeps the current file.
+- By default, download a repository ZIP, exclude dot-prefixed files and directories, and compare SHA-256 checksums. Unchanged files are skipped and unrelated local files are not removed.
 - If no `-InstallPath` is passed, look for the main PS1 next to the installer (`$PSScriptRoot`). If missing, ask for a destination, offering the **installer's directory** as the default.
 - If a temporary location is selected (`%TEMP%`, `%TMP%`, `C:\Temp`, etc.), require a different, permanent destination. An empty response is not accepted while the default is temporary. A temporary copy of **Install** itself is allowed.
 - Automatically find the existing project task across all Task Scheduler folders. With one match, reuse its folder; with no matching tasks, install in the root (`\`). If more than one project task is found, specify `-TaskPath` explicitly. Unrelated same-name tasks are never modified.
 - **Log directory:** on a first install, ask where to write `Update-WSUSComputerOperatingSystems.log`, suggesting the permanent main-script directory. Press **Enter** or submit an empty value to use that directory; the installer reports the fallback. A local absolute directory or UNC share path is supported.
 - **Upgrade from an older task without `-LogDirectory`:** ask for the directory **once**, using the permanent main-script directory as default. Once confirmed, the installer stores `-LogDirectory "..."` in the task action.
-- **Subsequent updates:** when the task already contains `-LogDirectory`, read and retain it **without prompting** and display it in `Installation summary`. An explicit `-LogDirectory` installer argument overrides the saved setting (an empty string resets to the main-script directory).
+- **Subsequent updates:** when the task already contains `-LogDirectory`, read and retain it **without prompting** and display it in `INSTALL / UPDATE SUMMARY`. An explicit `-LogDirectory` installer argument overrides the saved setting (an empty string resets to the main-script directory).
 - Show installation summary and ask for confirmation. An existing task is updated only after explicit confirmation. If no project task matches but an unrelated task has the same name, stop and require an explicit `-TaskPath`. Other same-name tasks are reported but not modified.
 - Only the project task **`Update-WSUSComputerOperatingSystems`** is created or updated. It does not replace your preexisting `WSUS Update Operating Systems` task.
-- Download the main script to a temporary stage, check PowerShell syntax and support for both `-AsService` and `-LogDirectory`, and replace it only after confirmation. A task that is currently running is stopped before reconfiguration and **restarted afterwards**. A newly created task is **started immediately** after registration (in addition to its startup trigger).
+- Extract the archive temporarily in `%TEMP%`; dot-prefixed GitHub files may be extracted there but are never installed. Stage all changed files beside their final locations as `.new` and verify SHA-256 before stopping the running task. Each file is replaced atomically, but a multi-file installation is **not transactional**: on failure, some files may already have changed. No old-version backups are created. Validate the main PS1 syntax and both `-AsService` and `-LogDirectory` parameters before installation. Start the task immediately after registration.
 - Register the task under `SYSTEM`, startup trigger delayed by one minute, unlimited execution time and restart-on-failure. The task action runs `Update-WSUSComputerOperatingSystems.ps1 -AsService -LogDirectory "..."` from the chosen permanent directory.
-- The installer does not copy itself into the installation directory. Uninstall removes **only the scheduled task**, leaving all files and logs untouched.
+- The installer is included among installed files and updated when changed. README files, LICENSE and `tests` are copied, but paths containing dot-prefixed components (such as `.gitignore` or `.github`) are not. Uninstall removes **only the scheduled task**, leaving all files and logs untouched.
 
 To specify a different Task Scheduler folder or SQL settings without extra prompts:
 
@@ -107,6 +107,15 @@ To specify a different Task Scheduler folder or SQL settings without extra promp
 .\Install-WSUSComputerOperatingSystems.ps1 -InstallPath 'C:\Scripts\WSUS' -TaskPath '\MP'
 .\Install-WSUSComputerOperatingSystems.ps1 -InstallPath 'C:\Scripts\WSUS' -TaskPath '\MP' -SQLServerInstance 'SQLSERVER\INSTANCE' -Encrypt Mandatory
 ```
+
+
+To update **only Task Scheduler settings** without downloading or replacing files:
+
+```powershell
+.\Install-WSUSComputerOperatingSystems.ps1 -InstallPath 'C:\Scripts\WSUS' -SkipFileUpdate
+```
+
+The main PS1 must already exist for this mode. Use `-RepositoryZipUrl` (HTTPS) to select a different repository ZIP or `-MainScriptUrl` to update only the main script from a trusted URL.
 
 The installer requests a task start immediately after successful registration. Check the log for startup and SQL access under `SYSTEM`. To start the task again manually:
 
@@ -122,7 +131,7 @@ To remove the task (leave script files untouched), its Task Scheduler folder is 
 
 Specify `-TaskPath '\MP'` only if multiple project tasks exist or you want to target a particular folder.
 
-**Security:** The installer must run elevated because it registers a SYSTEM task. Restrict write access to the permanent installation directory: anybody who can replace the main PS1 can control code executed as SYSTEM. Review remote code and validate its source. No scripts are downloaded when you decline an update and already have the main PS1.
+**Security:** The installer must run elevated because it registers a SYSTEM task. Restrict write access to the permanent installation directory: anybody who can replace the main PS1 can control code executed as SYSTEM. Review remote code and validate its source. A normal run downloads the ZIP for comparison first; declining at the summary leaves installed files and the scheduled task untouched. To avoid any download, use `-SkipFileUpdate`.
 
 ## How the listener works
 
@@ -141,7 +150,7 @@ The main script writes its regular log to the directory selected with `-LogDirec
 
 - **New installation:** the installer prompts for the log directory and offers the main-script directory as the default. Enter (or a blank response) selects that directory and prints an explanation.
 - **First upgrade of a legacy task:** if the existing Task Scheduler action has no `-LogDirectory`, the installer prompts **once** and uses the same default. The chosen directory is written into the updated task action.
-- **Normal updates:** the installer reads `-LogDirectory` from the existing task **without asking** and includes the retained path in `Installation summary`.
+- **Normal updates:** the installer reads `-LogDirectory` from the existing task **without asking** and includes the retained path in `INSTALL / UPDATE SUMMARY`.
 - **Explicit override:** pass `-LogDirectory` to the installer to change the stored destination, or pass `-LogDirectory ''` to return to the script directory.
 
 For example, to set or later change the folder by rerunning the installer:
