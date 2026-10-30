@@ -762,6 +762,7 @@ function Process-Changes([hashtable]$Before, [hashtable]$After, [hashtable]$Look
     }
 
     $updated = 0
+    $isFullScan = ($InitialReason -eq 'INITIAL')
     if ($wrong.Count -gt 0) {
         $names = Get-ComputerNames
         foreach ($entry in $wrong) {
@@ -772,14 +773,15 @@ function Process-Changes([hashtable]$Before, [hashtable]$After, [hashtable]$Look
                 $computer, $row.Id, $row.Build, $row.Description, $entry.Desired
             if ($count -eq 1) {
                 $updated++
-                Write-Log "UPDATED $msg"
+                # Full scans log one summary; event-driven corrections log individual changes.
+                if (-not $isFullScan) { Write-Log "UPDATED $msg" }
             } else {
                 Write-Log "SKIPPED (row changed concurrently): $msg" -Level WARNING
             }
         }
     }
-    if ($InitialReason -eq 'INITIAL' -or $wrong.Count -gt 0) {
-        Write-Log ('Affected={0}; wrong={1}; updated={2}' -f $affected.Count, $wrong.Count, $updated)
+    if ($isFullScan) {
+        Write-Log ('Reconciliation: checked={0}; wrong={1}; updated={2}' -f $affected.Count, $wrong.Count, $updated)
     }
 }
 

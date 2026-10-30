@@ -163,6 +163,8 @@ Each line uses the local server's time in the format `dd.MM.yyyy HH:mm:ss.fff [L
 24.10.2026 21:57:34.678 [ERROR] SQL/listener error: ...; reconnecting in 15 seconds.
 ```
 
+On startup and after SQL reconnection, a full reconciliation writes one `Reconciliation: checked=...; wrong=...; updated=...` summary instead of a separate `UPDATED INITIAL` line for each computer. During normal event monitoring, only actual changes (`UPDATED CHANGED ...`), warnings and errors are logged; there is no repeated `Affected=...` summary after individual notifications.
+
 The main script **appends only**: it never rotates, truncates or removes either log. Arrange retention or rotation externally if needed. Persistent connection failures can produce log lines every 15 seconds. Messages include catalog load, actual fixes, SQL errors and reconnects; no-op notifications are not logged. Logs are created when the main script runs, not by Install.
 
 To follow the main log (adjust the path to the directory currently configured in the scheduled task):
