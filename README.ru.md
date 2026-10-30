@@ -90,10 +90,20 @@ $branch = 'main'
 
 ### Скачать и запустить
 
-Однострочная команда скачивает **только `Update.ps1`** во временный файл с уникальным именем в `%TEMP%`, запускает без параметров, затем удаляет копию. При повторном обновлении расположение файлов определяется из планировщика, а не из временного каталога:
+**Одна команда PowerShell, записанная в несколько строк**, скачивает **только `Update.ps1`** во временный файл с уникальным именем в `%TEMP%`, запускает без параметров, затем удаляет копию. При повторном обновлении расположение файлов определяется из планировщика, а не из временного каталога. Скопируйте и вставьте весь блок в PowerShell:
 
 ```powershell
-$f=Join-Path $env:TEMP ("WSUS-Update-$([guid]::NewGuid().ToString('N')).ps1"); try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/avmaksimov/Update-WSUSComputerOperatingSystems/main/Update.ps1' -OutFile $f -ErrorAction Stop; & $f } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+& {
+    $f = Join-Path $env:TEMP ("WSUS-Update-$([guid]::NewGuid().ToString('N')).ps1")
+    $url = 'https://raw.githubusercontent.com/avmaksimov/Update-WSUSComputerOperatingSystems/main/Update.ps1'
+    try {
+        Invoke-WebRequest -UseBasicParsing $url -OutFile $f -ErrorAction Stop
+        & $f
+    }
+    finally {
+        Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+    }
+}
 ```
 
 Либо запустите установленный файл непосредственно:

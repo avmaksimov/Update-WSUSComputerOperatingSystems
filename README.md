@@ -90,10 +90,20 @@ The script has **no parameters**. It finds the project task in any Task Schedule
 
 ### Download and run
 
-A short one-liner downloads the **updater only** into a unique file under `%TEMP%`, runs it without arguments, then deletes the temporary copy. On an existing installation, the destination is found from Task Scheduler, not from the location of the temporary file:
+The following **single multi-line PowerShell command** downloads the **updater only** into a unique file under `%TEMP%`, runs it without arguments, then deletes the temporary copy. On an existing installation, the destination is found from Task Scheduler, not from the location of the temporary file. Copy and paste the entire block into PowerShell:
 
 ```powershell
-$f=Join-Path $env:TEMP ("WSUS-Update-$([guid]::NewGuid().ToString('N')).ps1"); try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/avmaksimov/Update-WSUSComputerOperatingSystems/main/Update.ps1' -OutFile $f -ErrorAction Stop; & $f } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+& {
+    $f = Join-Path $env:TEMP ("WSUS-Update-$([guid]::NewGuid().ToString('N')).ps1")
+    $url = 'https://raw.githubusercontent.com/avmaksimov/Update-WSUSComputerOperatingSystems/main/Update.ps1'
+    try {
+        Invoke-WebRequest -UseBasicParsing $url -OutFile $f -ErrorAction Stop
+        & $f
+    }
+    finally {
+        Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+    }
+}
 ```
 
 Alternatively, run the installed updater directly:
