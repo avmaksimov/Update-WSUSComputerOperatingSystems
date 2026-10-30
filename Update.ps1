@@ -243,6 +243,7 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $downloadUrl = $RepositoryZipUrl + '?cacheBust=' + [guid]::NewGuid().ToString('N')
     $headers = @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' }
+    Write-Host ''
     Write-Host "Source: $RepositoryZipUrl"
     Write-Host "Downloading repository ZIP with Invoke-WebRequest..."
     Invoke-WebRequest -Uri $downloadUrl -Headers $headers -OutFile $zip -UseBasicParsing -ErrorAction Stop
@@ -361,14 +362,19 @@ try {
         if ($state -eq 'Running') { throw 'Existing task did not stop; no installed files were replaced.' }
     }
 
-    # Each replacement is atomic on the same volume. Multi-file updates are
-    # not atomic as a group, and cannot be rolled back without backups.
+    # The .new files are on the destination volume. Replace an existing file
+    # using PowerShell's supported -Force overwrite, without backup files.
+    # A multi-file update is not a transaction; earlier moves are not rolled back.
     foreach ($item in $changes) {
         $newFile = $item.Target + '.new'
-        if ($item.State -eq 'REPLACE') {
-            [System.IO.File]::Replace($newFile, $item.Target, $null)
-        } else {
-            [System.IO.File]::Move($newFile, $item.Target)
+        try {
+            if ($item.State -eq 'REPLACE') {
+                Move-Item -LiteralPath $newFile -Destination $item.Target -Force -ErrorAction Stop
+            } else {
+                [System.IO.File]::Move($newFile, $item.Target)
+            }
+        } catch {
+            throw ('Failed to {0} {1} -> {2}: {3}' -f $item.State, $newFile, $item.Target, $_.Exception.Message)
         }
         $replacedCount++
         Write-Host ("{0}: {1}" -f $(if ($item.State -eq 'INSTALL') { 'Installed' } else { 'Replaced' }), $item.Name) -ForegroundColor Green
